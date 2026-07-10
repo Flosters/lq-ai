@@ -1,8 +1,12 @@
-"""Document parser adapters — PyMuPDF/Docling for PDF, a stdlib decode for text.
+"""Document parser adapters — PyMuPDF/Docling for PDF, Pandoc for DOCX, a stdlib decode for text.
 
 Plain text and Markdown (:func:`parse_text`) need no parsing library: the
 decoded bytes are themselves the canonical character stream, stored verbatim
-so citations resolve byte-for-byte. PDF needs real extraction, per ADR 0006:
+so citations resolve byte-for-byte. DOCX (:func:`parse_docx`, ADR 0017) shells
+out to a pinned Pandoc binary — the Markdown it emits is the canonical stream,
+with tracked changes resolved to the *changes-accepted* text and the full
+revision layer (insertions/deletions/comments with author + date) retained in
+``structured_content``. PDF needs real extraction, per ADR 0006:
 
 * **PyMuPDF** is the source of truth for the canonical character
   stream. Every chunk's ``content`` slices the PyMuPDF output by
@@ -251,6 +255,346 @@ def parse_text(raw_bytes: bytes) -> ParsedDocument:
         parser_version="1",
         structured_content=None,
     )
+
+
+# ---------------------------------------------------------------------------
+# DOCX (ADR 0017 — Pandoc canonical stream, tracked changes retained)
+# ---------------------------------------------------------------------------
+
+# The one MIME registered for OOXML WordprocessingML. Legacy binary .doc
+# (application/msword) stays unsupported — OOXML only, per the mini-PRD
+# scope cut.
+SUPPORTED_DOCX_MIMES = frozenset(
+    {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+)
+
+# Extension fallback for generic-MIME uploads, mirroring TEXT_EXTENSIONS:
+# browsers occasionally send .docx as application/octet-stream. Routing by
+# extension is safe because parse_docx still validates the bytes (Pandoc
+# rejects a non-OOXML package), so a mislabeled file fails cleanly.
+DOCX_EXTENSIONS = (".docx",)
+
+# Wall-clock budget for the Pandoc subprocess (ADR 0017 §5 — untrusted
+# input must never hang the worker). Generous: real contracts convert in
+# well under a second; a pathological package hits this and fails loud.
+PANDOC_TIMEOUT_SECONDS = 120
+
+_PANDOC_ARGS = (
+    "-f",
+    "docx",
+    "-t",
+    "markdown",
+    "--track-changes=all",
+    "--wrap=none",
+    "--markdown-headings=atx",
+    "--sandbox",
+)
+
+# Track-change / comment spans in Pandoc's markdown output, e.g.
+#   [USD 200]{.insertion author="Laura" date="2026-01-02T10:00:00Z"}
+# The bracketed text may contain backslash-escaped brackets.
+_SPAN_RX = None  # compiled lazily in _resolve_track_changes
+
+
+def is_docx_mime(mime_type: str) -> bool:
+    """Return True if the MIME indicates an OOXML Word document.
+
+    Parameters (rare on this type, but uploaders vary) are ignored, matching
+    :func:`is_text_mime`.
+    """
+
+    base = mime_type.split(";", 1)[0].strip().lower()
+    return base in SUPPORTED_DOCX_MIMES
+
+
+def is_docx_filename(filename: str) -> bool:
+    """Return True if the filename has the .docx extension.
+
+    The fallback for generic-MIME uploads (application/octet-stream), same
+    role as :func:`is_text_filename` for text.
+    """
+
+    return filename.lower().endswith(DOCX_EXTENSIONS)
+
+
+def parse_docx(raw_bytes: bytes) -> ParsedDocument:
+    """Build a canonical :class:`ParsedDocument` from a .docx upload (ADR 0017).
+
+    One ``pandoc --track-changes=all`` pass produces Markdown carrying the
+    tracked changes and comments inline as spans. From it we derive:
+
+    * ``canonical_text`` — the *changes-accepted* text (insertions kept,
+      deletions dropped, comment markers removed). Byte-identical to a
+      separate ``--track-changes=accept`` pass (spike-validated; enforced
+      by test), so the offset-fidelity contract holds and the Citation
+      Engine re-reads verbatim. DOCX has no fixed pagination, so the
+      document is one synthetic page (same convention as ``parse_text``).
+    * ``structured_content["revisions"]`` — every insertion, deletion, and
+      comment with ``text``, ``author``, ``date``, and a char anchor into
+      ``canonical_text`` (deletions anchor as empty spans at the point the
+      text was removed). Retained, not discarded — the redline *is* the
+      signal in legal review.
+
+    Pandoc is invoked as a separate subprocess at arm's length (GPL posture,
+    ADR 0017 §6) with ``--sandbox`` and a wall-clock timeout (§5). Known v1
+    gaps, per the ADR: a comment anchored to an unaccepted insertion is
+    dropped by Pandoc itself (upstream #9833 — the OOXML fallback is future
+    work), and comment reply threads are not reconstructed.
+    """
+
+    import shutil
+    import subprocess
+
+    if not raw_bytes:
+        raise ParserError("DOCX input is empty")
+
+    binary = shutil.which("pandoc")
+    if binary is None:
+        raise ParserError(
+            "pandoc binary not found on PATH; DOCX ingestion cannot run "
+            "(ADR 0017 pins it in the api and ingest-worker images)"
+        )
+
+    try:
+        proc = subprocess.run(
+            [binary, *_PANDOC_ARGS],
+            input=raw_bytes,
+            capture_output=True,
+            timeout=PANDOC_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ParserError(f"pandoc exceeded {PANDOC_TIMEOUT_SECONDS}s parsing the DOCX") from exc
+
+    if proc.returncode != 0:
+        # Pandoc's stderr on bad input names the failure without echoing
+        # document content ("couldn't unpack docx container: …").
+        detail = proc.stderr.decode("utf-8", errors="replace").strip()[:200]
+        raise ParserDecodeError(f"not a readable .docx package: {detail}")
+
+    markdown_all = proc.stdout.decode("utf-8")
+    canonical_text, revisions = _resolve_track_changes(markdown_all)
+
+    if "\x00" in canonical_text:
+        raise ParserDecodeError(
+            "extracted DOCX text contains a NUL byte (0x00); refusing to "
+            "persist (PostgreSQL text columns cannot store it)"
+        )
+
+    return ParsedDocument(
+        canonical_text=canonical_text,
+        pages=[PageSpan(page_number=1, char_start=0, char_end=len(canonical_text))],
+        page_count=1,
+        parser="pandoc",
+        parser_version=f"pandoc={_safe_pandoc_version(binary)}",
+        structured_content={
+            "source": "pandoc-track-changes",
+            "revisions": revisions,
+        },
+    )
+
+
+def _resolve_track_changes(
+    markdown_all: str,
+) -> tuple[str, list[dict[str, object]]]:
+    """Resolve ``--track-changes=all`` spans into accepted text + revisions.
+
+    Walks the Markdown once. Insertion spans unwrap into the output;
+    deletion spans are dropped (recorded as empty-span anchors); comment
+    start/end markers are removed while the commented body text stays.
+    Spans with any other class (e.g. ``{.underline}``) pass through
+    verbatim — they are part of the canonical stream.
+
+    A fully-deleted paragraph leaves an empty block behind; Pandoc's own
+    ``accept`` output removes the block *and* its blank-line separator, so
+    :func:`_collapse_empty_blocks` normalises the newline runs afterwards
+    (adjusting the recorded anchors) to preserve byte-identity.
+    """
+
+    import re
+
+    global _SPAN_RX
+    if _SPAN_RX is None:
+        _SPAN_RX = re.compile(r"\[((?:\\.|[^\]\\])*)\]\{([^}]*)\}")
+
+    out: list[str] = []
+    out_len = 0
+    revisions: list[dict[str, object]] = []
+    open_comments: list[dict[str, object]] = []
+    pos = 0
+
+    def _attr(attrs: str, name: str) -> str:
+        m = re.search(rf'{name}="([^"]*)"', attrs)
+        return m.group(1) if m else ""
+
+    for match in _SPAN_RX.finditer(markdown_all):
+        literal = markdown_all[pos : match.start()]
+        out.append(literal)
+        out_len += len(literal)
+        pos = match.end()
+
+        inner, attrs = match.group(1), match.group(2)
+        kind = attrs.split(None, 1)[0] if attrs else ""
+
+        if kind == ".insertion":
+            revisions.append(
+                {
+                    "kind": "insertion",
+                    "text": inner,
+                    "author": _attr(attrs, "author"),
+                    "date": _attr(attrs, "date"),
+                    "char_start": out_len,
+                    "char_end": out_len + len(inner),
+                }
+            )
+            out.append(inner)
+            out_len += len(inner)
+        elif kind == ".deletion":
+            revisions.append(
+                {
+                    "kind": "deletion",
+                    "text": inner,
+                    "author": _attr(attrs, "author"),
+                    "date": _attr(attrs, "date"),
+                    "char_start": out_len,
+                    "char_end": out_len,
+                }
+            )
+        elif kind == ".comment-start":
+            # The bracketed text of a comment-start span is the comment
+            # body; the *anchored document text* follows until the paired
+            # comment-end marker. The body is not document text — record
+            # it, emit nothing.
+            open_comments.append(
+                {
+                    "kind": "comment",
+                    "id": _attr(attrs, "id"),
+                    "text": inner,
+                    "author": _attr(attrs, "author"),
+                    "date": _attr(attrs, "date"),
+                    "char_start": out_len,
+                }
+            )
+        elif kind == ".comment-end":
+            comment_id = _attr(attrs, "id")
+            idx = next(
+                (i for i, c in enumerate(open_comments) if c["id"] == comment_id),
+                len(open_comments) - 1,
+            )
+            if idx >= 0:
+                comment = open_comments.pop(idx)
+                comment.pop("id", None)
+                comment["char_end"] = out_len
+                revisions.append(comment)
+        elif kind in (".paragraph-insertion", ".paragraph-deletion"):
+            # Paragraph-mark change markers: always empty spans; the run
+            # content is carried by the sibling .insertion/.deletion span.
+            pass
+        else:
+            # Not a track-change span — canonical Markdown, keep verbatim.
+            whole = match.group(0)
+            out.append(whole)
+            out_len += len(whole)
+
+    tail = markdown_all[pos:]
+    out.append(tail)
+    out_len += len(tail)
+
+    # Defensive: an unpaired comment-start closes at end-of-document.
+    for comment in open_comments:
+        comment.pop("id", None)
+        comment["char_end"] = out_len
+        revisions.append(comment)
+
+    text = "".join(out)
+    text, revisions = _collapse_empty_blocks(text, revisions)
+    revisions.sort(key=lambda r: (r["char_start"], r["char_end"]))
+    return text, revisions
+
+
+def _collapse_empty_blocks(
+    text: str, revisions: list[dict[str, object]]
+) -> tuple[str, list[dict[str, object]]]:
+    """Normalise newline runs left behind by fully-deleted paragraphs.
+
+    Pandoc's Markdown separates blocks with exactly one blank line and
+    never emits three-plus consecutive newlines — so any such run in the
+    resolved text is the residue of a dropped (fully-deleted) block.
+    Collapse interior runs to ``\\n\\n``, strip a leading run, reduce a
+    trailing run to a single ``\\n``, and shift the revision anchors that
+    sit at or beyond each collapse point so they keep slicing verbatim.
+    """
+
+    import re
+
+    replacements: list[tuple[int, int, str]] = []
+    lead = re.match(r"\n+", text)
+    if lead:
+        replacements.append((0, lead.end(), ""))
+    for m in re.finditer(r"\n{3,}", text):
+        if lead and m.start() < lead.end():
+            continue
+        replacement = "\n" if m.end() == len(text) else "\n\n"
+        replacements.append((m.start(), m.end(), replacement))
+
+    if not replacements:
+        return text, revisions
+
+    def _shift(offset: int) -> int:
+        shifted = offset
+        for start, end, repl in replacements:
+            if offset >= end:
+                shifted -= (end - start) - len(repl)
+            elif offset > start:
+                # Anchor inside a collapsed run (a deletion's point anchor):
+                # snap it to just after the replacement separator.
+                shifted -= offset - start - min(offset - start, len(repl))
+        return shifted
+
+    from typing import cast
+
+    for rev in revisions:
+        rev["char_start"] = _shift(cast(int, rev["char_start"]))
+        rev["char_end"] = _shift(cast(int, rev["char_end"]))
+
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, repl in replacements:
+        pieces.append(text[cursor:start])
+        pieces.append(repl)
+        cursor = end
+    pieces.append(text[cursor:])
+    return "".join(pieces), revisions
+
+
+def _safe_pandoc_version(binary: str) -> str:
+    """Return the pinned Pandoc binary's version string, defensively.
+
+    Cached per-process — the binary is pinned in the image (ADR 0017 §4),
+    so it cannot change under a running worker.
+    """
+
+    global _PANDOC_VERSION
+    if _PANDOC_VERSION is None:
+        import re
+        import subprocess
+
+        try:
+            head = subprocess.run(
+                [binary, "--version"],
+                capture_output=True,
+                timeout=10,
+                check=True,
+            ).stdout.decode("utf-8", errors="replace")
+            m = re.match(r"pandoc(?:\.exe)?\s+([\w.]+)", head)
+            _PANDOC_VERSION = m.group(1) if m else "unknown"
+        except Exception:  # pragma: no cover — defensive
+            _PANDOC_VERSION = "unknown"
+    return _PANDOC_VERSION
+
+
+_PANDOC_VERSION: str | None = None
 
 
 def parse_pdf(pdf_bytes: bytes, *, run_docling: bool = True) -> ParsedDocument:
