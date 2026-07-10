@@ -141,6 +141,14 @@ let refreshInFlight: Promise<AuthSession | null> | null = null;
 export function refreshAccessToken(): Promise<AuthSession | null> {
   if (refreshInFlight) return refreshInFlight;
 
+  // The coalescing handle is released via .finally() on the promise —
+  // NOT a try/finally inside the closure. The no-refresh-token path
+  // settles synchronously, so an inner finally would run before the
+  // `refreshInFlight = …` assignment below and be overwritten, leaving
+  // the stale promise cached for the pane's lifetime (every later
+  // refresh returned the old result and never hit the network).
+  // Promise#finally callbacks always run on a microtask after the
+  // assignment has completed, so the release can't be clobbered.
   refreshInFlight = (async () => {
     const session = getSession();
     if (!session || !session.refresh_token) {
@@ -162,10 +170,10 @@ export function refreshAccessToken(): Promise<AuthSession | null> {
     } catch {
       clearSession();
       return null;
-    } finally {
-      refreshInFlight = null;
     }
-  })();
+  })().finally(() => {
+    refreshInFlight = null;
+  });
 
   return refreshInFlight;
 }

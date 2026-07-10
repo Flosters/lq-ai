@@ -61,7 +61,10 @@ export interface VersionInfo {
  *  ship as `X.Y.Z` so this is a defensive default, not a meaningful
  *  semver pre-release ordering. */
 export function parseVersion(value: string): number[] {
-  return value.split(".").map((segment) => {
+  // Drop any pre-release suffix ("0.3.0-rc.1" -> "0.3.0") before splitting
+  // -- the suffix's own dots are not version segments.
+  const release = value.split("-")[0];
+  return release.split(".").map((segment) => {
     const match = segment.match(/^(\d+)/);
     return match ? Number.parseInt(match[1], 10) : 0;
   });
