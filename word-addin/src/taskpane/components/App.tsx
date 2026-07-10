@@ -9,14 +9,16 @@
  *      the operator through a broken OAuth handshake.
  *   2. Sign-in gate — version is compatible (or check is "unknown") but
  *      no LQ.AI session is stored locally (M3-B2 OAuth).
- *   3. Authenticated layout — header + tab strip + deep-link card per
- *      tab. The feature surfaces inside each tab are descoped to M4 /
- *      community contribution per PRD §9 DE-287.
+ *   3. Authenticated layout — header + tab strip + the tab's surface.
+ *      Chat and playbooks render real in-Word surfaces (DE-287); the
+ *      skills tab stays a deep-link card in this pass (playbooks cover
+ *      the redline use case).
  */
 import React, { useEffect, useState } from "react";
 import { Header } from "./Header";
 import { TabStrip, type TabId } from "./TabStrip";
 import { DeepLinkCard } from "./DeepLinkCard";
+import { ChatPane } from "./ChatPane";
 import { SignInGate } from "./SignInGate";
 import { UpdateNeededOverlay } from "./UpdateNeededOverlay";
 import { getSession, logout, type AuthSession } from "../auth";
@@ -123,11 +125,15 @@ export const App: React.FC = () => {
         {version?.status === "unknown" && (
           <VersionUnknownBanner reason={version.error} />
         )}
-        <DeepLinkCard
-          title={content.title}
-          body={content.body}
-          href={deepLinkHref}
-        />
+        {activeTab === "chat" ? (
+          <ChatPane deploymentOrigin={deploymentOrigin} />
+        ) : (
+          <DeepLinkCard
+            title={content.title}
+            body={content.body}
+            href={deepLinkHref}
+          />
+        )}
       </main>
       <footer className="lq-footer">
         <a
