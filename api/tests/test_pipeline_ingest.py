@@ -749,3 +749,199 @@ async def test_ingest_re_run_refreshes_normalized_content(
     parsed = parse_pdf(pdf_bytes, run_docling=False)
     assert doc.normalized_content == parsed.canonical_text
     assert doc.was_ocrd is False
+
+
+# ---------------------------------------------------------------------------
+# DOCX route (ADR 0017)
+# ---------------------------------------------------------------------------
+
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+@pytest.mark.integration
+async def test_ingest_docx_happy_path_marks_ready_with_chunks(
+    db_session: AsyncSession,
+    db_user: User,
+    fake_s3: FakeS3Client,
+    patched_storage: FakeS3Client,
+) -> None:
+    """A .docx upload ingests to ``ready`` via the Pandoc branch (ADR 0017),
+    and every persisted chunk re-reads verbatim against normalized_content —
+    the Citation Engine precondition, now holding for Word files."""
+
+    import shutil as _shutil
+
+    if _shutil.which("pandoc") is None:
+        pytest.skip("pandoc binary not on PATH")
+
+    from tests.test_pipeline_parsers_docx import _plain_docx
+
+    body = _plain_docx()
+    storage_key = f"{uuid.uuid4()}"
+    _put_in_fake_s3(fake_s3, storage_key, body)
+
+    file_row = await _create_file_row(
+        db_session,
+        db_user,
+        storage_path=storage_key,
+        pdf_bytes=body,
+        mime=DOCX_MIME,
+        filename="contrato.docx",
+    )
+
+    result = await ingest_file(db_session, file_row.id)
+
+    assert result.status == "ready", f"expected ready, got {result.status}/{result.error}"
+    assert result.error is None
+    assert result.chunk_count > 0
+    assert result.parser == "pandoc"
+
+    await db_session.refresh(file_row)
+    assert file_row.ingestion_status == "ready"
+
+    doc = (
+        await db_session.execute(select(Document).where(Document.file_id == file_row.id))
+    ).scalar_one()
+    assert doc.parser == "pandoc"
+    assert doc.page_count == 1
+    assert doc.was_ocrd is False
+    assert "Cláusula 1. Objeto del contrato." in doc.normalized_content
+
+    chunks = (
+        (
+            await db_session.execute(
+                select(DocumentChunk)
+                .where(DocumentChunk.document_id == doc.id)
+                .order_by(DocumentChunk.chunk_index)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(chunks) > 0
+    for chunk in chunks:
+        assert (
+            doc.normalized_content[chunk.char_offset_start : chunk.char_offset_end] == chunk.content
+        )
+        assert chunk.page_start == 1 and chunk.page_end == 1
+
+
+@pytest.mark.integration
+async def test_ingest_docx_redline_stores_accepted_text_and_revisions(
+    db_session: AsyncSession,
+    db_user: User,
+    fake_s3: FakeS3Client,
+    patched_storage: FakeS3Client,
+) -> None:
+    """The redline policy end-to-end: a tracked-changes .docx persists the
+    changes-accepted text as normalized_content and the revision layer in
+    documents.structured_content."""
+
+    import shutil as _shutil
+
+    if _shutil.which("pandoc") is None:
+        pytest.skip("pandoc binary not on PATH")
+
+    from tests.test_pipeline_parsers_docx import _redlined_docx
+
+    body = _redlined_docx()
+    storage_key = f"{uuid.uuid4()}"
+    _put_in_fake_s3(fake_s3, storage_key, body)
+
+    file_row = await _create_file_row(
+        db_session,
+        db_user,
+        storage_path=storage_key,
+        pdf_bytes=body,
+        mime=DOCX_MIME,
+        filename="redline.docx",
+    )
+
+    result = await ingest_file(db_session, file_row.id)
+    assert result.status == "ready", f"expected ready, got {result.status}/{result.error}"
+
+    doc = (
+        await db_session.execute(select(Document).where(Document.file_id == file_row.id))
+    ).scalar_one()
+    assert "USD 200" in doc.normalized_content  # insertion accepted
+    assert "USD 100" not in doc.normalized_content  # deletion dropped
+    revisions = doc.structured_content["revisions"]
+    assert {r["kind"] for r in revisions} == {"insertion", "deletion"}
+    assert all(r["author"] == "Laura Fernández" for r in revisions)
+
+
+@pytest.mark.integration
+async def test_ingest_docx_as_octet_stream_routes_by_extension(
+    db_session: AsyncSession,
+    db_user: User,
+    fake_s3: FakeS3Client,
+    patched_storage: FakeS3Client,
+) -> None:
+    """Browsers sometimes send .docx as application/octet-stream; the gate
+    falls back to the filename extension (parse_docx still validates the
+    bytes, so a mislabeled non-OOXML file fails cleanly)."""
+
+    import shutil as _shutil
+
+    if _shutil.which("pandoc") is None:
+        pytest.skip("pandoc binary not on PATH")
+
+    from tests.test_pipeline_parsers_docx import _plain_docx
+
+    body = _plain_docx()
+    storage_key = f"{uuid.uuid4()}"
+    _put_in_fake_s3(fake_s3, storage_key, body)
+
+    file_row = await _create_file_row(
+        db_session,
+        db_user,
+        storage_path=storage_key,
+        pdf_bytes=body,
+        mime="application/octet-stream",
+        filename="contrato.docx",
+    )
+
+    result = await ingest_file(db_session, file_row.id)
+
+    assert result.status == "ready", f"expected ready, got {result.status}/{result.error}"
+    doc = (
+        await db_session.execute(select(Document).where(Document.file_id == file_row.id))
+    ).scalar_one()
+    assert doc.parser == "pandoc"
+
+
+@pytest.mark.integration
+async def test_ingest_docx_corrupt_bytes_fail_decode_error(
+    db_session: AsyncSession,
+    db_user: User,
+    fake_s3: FakeS3Client,
+    patched_storage: FakeS3Client,
+) -> None:
+    """A spoofed-MIME non-OOXML byte stream fails as decode_error — loud,
+    terminal, and honest (ADR 0017 §5), never a hang or a stuck row."""
+
+    import shutil as _shutil
+
+    if _shutil.which("pandoc") is None:
+        pytest.skip("pandoc binary not on PATH")
+
+    body = b"definitely not a zip archive"
+    storage_key = f"{uuid.uuid4()}"
+    _put_in_fake_s3(fake_s3, storage_key, body)
+
+    file_row = await _create_file_row(
+        db_session,
+        db_user,
+        storage_path=storage_key,
+        pdf_bytes=body,
+        mime=DOCX_MIME,
+        filename="spoofed.docx",
+    )
+
+    result = await ingest_file(db_session, file_row.id)
+
+    assert result.status == "failed"
+    assert result.error == "decode_error"
+    await db_session.refresh(file_row)
+    assert file_row.ingestion_status == "failed"
+    assert file_row.ingestion_error == "decode_error"
