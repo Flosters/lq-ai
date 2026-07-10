@@ -4502,7 +4502,7 @@ Two bulk operations as originally written in the M3-C4 spec:
 
 #### DE-332 — Text/markdown ingest-parser support
 
-**Status: Shipped (post-v0.5.0).** `parse_text` (`api/app/pipeline/parsers.py`) accepts `text/plain` / `text/markdown`, stores the verbatim decoded bytes as canonical text so exact-match citations resolve against the source, and fails a non-UTF-8 upload as `decode_error` rather than guessing an encoding. Markdown is stored verbatim, never rendered. Tests: `api/tests/test_pipeline_parsers_text.py` (unit, no PyMuPDF) + `api/tests/test_pipeline_ingest.py` (ingest happy-path + decode_error). DOCX remains roadmap.
+**Status: Shipped (post-v0.5.0).** `parse_text` (`api/app/pipeline/parsers.py`) accepts `text/plain` / `text/markdown`, stores the verbatim decoded bytes as canonical text so exact-match citations resolve against the source, and fails a non-UTF-8 upload as `decode_error` rather than guessing an encoding. Markdown is stored verbatim, never rendered. Tests: `api/tests/test_pipeline_parsers_text.py` (unit, no PyMuPDF) + `api/tests/test_pipeline_ingest.py` (ingest happy-path + decode_error). DOCX shipped separately per ADR 0017 — see DE-386.
 
 **Priority:** P3 · **Effort:** M · **Good first issue** (community-suitable)
 
@@ -5009,6 +5009,18 @@ The gateway `Router`'s `_tool_rate_limiter` (`gateway/app/router.py`) is a singl
 **Priority:** P3 · **Effort:** XS · **Status (2026-07-04): filed (v0.6.1 release).**
 
 `desktop/package.json` is bumped by hand each release (0.6.0 → 0.6.1 at v0.6.1), but `desktop/package-lock.json` still carries `"version": "0.5.2"` at its top level (and in `packages[""].version`) — it was never regenerated when `package.json` moved to 0.6.0 at the v0.6.0 cut, and the v0.6.1 bump left it untouched (hand-editing the lockfile version risks desyncing the resolved dependency tree, so it was deliberately not patched inline). npm keeps the lockfile version in sync only on `npm install`. The desktop app itself versions on its own `desktop-vX.Y.Z` tag track (independent of the lock's stale field), so this is cosmetic/hygiene, not a build correctness bug — but it makes the lockfile a misleading provenance artifact. Fix: run `npm install` in `desktop/` (no dependency changes intended — just let npm rewrite the version field), verify the diff is version-only, and commit; then fold a "regenerate the lockfile" step into the release checklist so `package.json` and the lock never drift again.
+
+---
+
+#### DE-386 — DOCX ingest: OOXML comment fallback (#9833) + separately-citable deletions/comments
+
+**Priority:** P2 · **Effort:** M · **Status (2026-07-10): core shipped; two follow-ups open.**
+
+**Context:** DOCX ingest per [ADR 0017](adr/0017-docx-ingest-via-pandoc.md) shipped: `parse_docx` (`api/app/pipeline/parsers.py`) runs one pinned-Pandoc `--track-changes=all` pass; `canonical_text`/`normalized_content` is the changes-accepted text (validated byte-identical to a separate `accept` pass by test), and the revision layer (insertions/deletions/comments with `author`, `date`, char anchors) rides in `documents.structured_content`. The gate + dispatch in `api/app/pipeline/ingest.py` admit the OOXML MIME plus a `.docx`-extension fallback for generic-MIME uploads. Tests: `api/tests/test_pipeline_parsers_docx.py` (offset fidelity, redline policy, paragraph-level redlines, comments, determinism, spoofed-MIME rejection) + DOCX cases in `api/tests/test_pipeline_ingest.py`. Pandoc is pinned in `api/Dockerfile` / `api/Dockerfile.release` and recorded in `parser_version`.
+
+**Specific scope (the two ADR 0017 items deliberately not in the core PR):** (a) the `zipfile`+`lxml` OOXML fallback that recovers a comment anchored to an *unaccepted insertion* — Pandoc drops it (upstream [#9833](https://github.com/jgm/pandoc/issues/9833)), and that shape is common in live redlines; (b) emitting deletions and comments as separately-citable chunks (provenance-tagged in `metadata_json`) so a citation can land on removed or flagged text and report "deleted/flagged by X on date Y". Threaded comment replies (`commentsExtended.xml`) stay deferred per the mini-PRD scope cuts.
+
+**When to ship:** (a) when redline review in the Word add-in goes live (comments on inserted clauses are the reviewer's main channel); (b) when the Citation Engine starts answering "what was the original fee?" style questions against redlined uploads.
 
 ---
 

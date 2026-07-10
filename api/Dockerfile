@@ -13,6 +13,22 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 RUN pip install --no-cache-dir .
 
+# Pandoc — the DOCX canonical-stream reader (ADR 0017), invoked at arm's
+# length as a subprocess by app/pipeline/parsers.py. Pinned to an exact
+# version: Pandoc output is deterministic per version only, and
+# documents.parser_version records the version for re-ingest-on-drift
+# decisions. Installed here for both the api service and the ingest-worker
+# (both build from this Dockerfile).
+ARG PANDOC_VERSION=3.6.4
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && arch="$(dpkg --print-architecture)" \
+ && curl -fsSL "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-${arch}.tar.gz" \
+    | tar -xz -C /usr/local --strip-components=1 "pandoc-${PANDOC_VERSION}/bin/pandoc" \
+ && apt-get purge -y curl \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+
 # Copy application code, migration files, and the entrypoint script
 COPY app/ ./app/
 COPY alembic.ini ./alembic.ini
