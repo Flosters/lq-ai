@@ -33,15 +33,19 @@ the first. Both are tracked explicitly so the boundary is unambiguous.
    click through to the web app — but it does not yet act on the open
    document.
 
-2. **The feature surface** *(not built; tracked at
+2. **The feature surface** *(partially built; tracked at
    [PRD §9 DE-287](PRD.md#de-287--word-add-in-feature-surface-chat-skills-playbooks-tier-badge--deferred-to-m4--community-contribution))*
-   — chat against the open document, running skills with redlines as
-   tracked changes and assessments as Word comments, playbook
-   execution with per-position rendering, and the Inference Tier badge.
-   This is the work the PRD §3.9 user stories describe ("click Apply
-   MSA-SaaS Playbook; the system applies tracked changes + comments").
-   It is descoped to M4 / community contribution. At v0.3.0 each tab is
-   a deep-link card placeholder.
+   — **chat against the open document** and **playbook execution with
+   tracked changes + comments** now render real in-Word surfaces
+   (`ChatPane` / `PlaybookPane`, backed by `chatController` /
+   `playbookController`, the `office.ts` document-snapshot bridge, the
+   `lqApi.ts` client, and the `redline.ts` tracked-changes applier).
+   Both surfaces use an upload-snapshot model — a `.docx` copy of the
+   open document is uploaded and ingested (requires the DOCX branch,
+   ADR 0017) — and the manifest requires WordApi 1.4 for
+   `insertComment` / `changeTrackingMode`. Running skills in Word and
+   the Inference Tier badge remain deferred; the skills tab is still a
+   deep-link card placeholder.
 
 A third concern — the **signed manifest + enterprise distribution
 package** (M3-B7) — is descoped to a community-led effort and tracked
@@ -293,10 +297,11 @@ exactly one of:
    quote to their admin.
 2. **Sign-in gate** — version compatible (or `unknown`) but no stored
    session. A `unknown` handshake adds a soft `VersionUnknownBanner`.
-3. **Authenticated layout** — header + tab strip + deep-link card per
-   tab. The card bodies state plainly that the in-Word feature is on the
-   M4 / community roadmap (DE-287) and link to the equivalent web-app
-   surface.
+3. **Authenticated layout** — header + tab strip + the tab's surface:
+   the chat and playbooks tabs render their in-Word surfaces
+   (`ChatPane` / `PlaybookPane`); the skills tab renders a deep-link
+   card whose copy states the in-Word feature is on the M4 / community
+   roadmap (DE-287) and links to the equivalent web-app surface.
 
 ---
 
@@ -395,15 +400,23 @@ pre-sign-in) and returns only non-sensitive version/URL metadata.
 The M3 plumbing is install-authenticate-version-check only. The
 limitations below are scope boundaries, not bugs.
 
-### Feature surface is deep-link placeholders — by design
+### Feature surface: chat + playbooks shipped, skills still a placeholder
 
-Every authenticated tab (chat, skills, playbooks) renders a
-`DeepLinkCard` whose copy states the in-Word feature is on the M4 /
-community roadmap and links to the equivalent web-app surface. The
-Inference Tier badge is an inert placeholder in the header. This is
-[DE-287](PRD.md#de-287--word-add-in-feature-surface-chat-skills-playbooks-tier-badge--deferred-to-m4--community-contribution),
-not unfinished work — the add-in is intentionally a usable shell over
-the web app until the feature work is claimed.
+The chat and playbooks tabs render in-Word surfaces (DE-287, partial):
+chat lazily creates an lq-ai chat and attaches a `.docx` snapshot of
+the open document per turn (`file_ids` ephemeral channel, hash-skipped
+re-upload); playbooks snapshot → upload → wait-for-ingest → execute →
+apply deviating positions as tracked changes with the rationale as a
+Word comment, reporting applied/commented/missed/missing honestly.
+The skills tab still renders a `DeepLinkCard` and the Inference Tier
+badge is an inert placeholder in the header — that remainder is
+[DE-287](PRD.md#de-287--word-add-in-feature-surface-chat-skills-playbooks-tier-badge--deferred-to-m4--community-contribution).
+
+Manual verification of both surfaces needs a running stack with DOCX
+ingest (ADR 0017) plus a sideloaded Word client; the checklist lives in
+the shipping commits (chat: ask about a contract with attach ON;
+playbooks: run the seeded NDA playbook, accept/reject the tracked
+changes from Word's Review tab).
 
 ### No signed distribution package
 

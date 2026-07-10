@@ -24,7 +24,7 @@ Status markers reference the roadmap milestones (M1 → M4) documented in [READM
 
 **M3 — Playbooks · Tabular Review · Word add-in · Slack/Teams intake bridge (shipped, with two honest caveats).**
 - **Playbooks** and **Tabular / multi-document review** ship operational end-to-end (real execution against documents, with cost tracking and export).
-- The **Word add-in** ships as a **scaffold** — installable, authenticatable, version-safe — but its substantive in-Word feature surfaces (chat, skills with tracked changes, playbook execution) are deferred ([DE-287](PRD.md#9-deferred-enhancements-and-identified-future-work)); today its tabs deep-link to the web app.
+- The **Word add-in** ships its plumbing (installable, authenticatable, version-safe) plus two of the four in-Word feature surfaces: **chat against the open document** and **playbook execution with tracked changes** (DE-287, partial). The skills tab and the Inference Tier badge remain deferred; the skills tab still deep-links to the web app.
 - The **Slack/Teams light intake bridge** ships **partial** — the bridge services, OAuth install flows, encrypted persistence, and admin management are wired and unit-tested, but the flows have **not been exercised end-to-end against live Slack/Microsoft endpoints** ([DE-312](PRD.md#9-deferred-enhancements-and-identified-future-work)), and the `/lq` slash-command surface is inert ([DE-288](PRD.md#9-deferred-enhancements-and-identified-future-work)).
 
 **M4 — Autonomous Layer (shipped).** The background autonomous executor runs real in-loop work: a five-phase LangGraph state machine (intake → analysis → drafting → ethics_review → delivery) where every external action routes through a single `guarded_tool_call` chokepoint enforcing three brakes — R4 (per-session/per-trigger cost cap), R5 (external halt + idle watchdog), R6 (phase-gated tool grants). It ships the four primitives (watches, schedules, per-user memory, precedent board), honest per-session receipts, per-user opt-in, and a full web dashboard. The **Contract Repository auto-relationship graph** (a separate M4-roadmap capability) is **not** built.
@@ -135,17 +135,19 @@ Run a skill (or ad-hoc column spec) across a document corpus into a document × 
 
 **Caveat (honest):** tabular has unit/component backend coverage (`api/tests/tabular/` — nodes, cost, export, schemas, worker, executor-spans), but no per-endpoint integration test driving the handlers end-to-end against a live DB yet — a known gap. Bulk-op sibling infrastructure (`parent_execution_id`) is present but not yet exercised.
 
-### 4.3 Word add-in (Office.js) — scaffold only
+### 4.3 Word add-in (Office.js) — plumbing + chat & playbooks surfaces
 
 | Capability | Status | Verification |
 |---|---|---|
-| Installable Office.js add-in (manifest, task pane, React shell) | scaffold (M3) | `word-addin/manifest.xml`, `word-addin/src/taskpane/` |
+| Installable Office.js add-in (manifest, task pane, React shell) | M3 | `word-addin/manifest.xml`, `word-addin/src/taskpane/` |
 | Admin manifest download + version handshake | M3 | `api/app/api/word_addin.py` (`GET /api/v1/admin/word-addin/manifest`, `GET /api/v1/word-addin/version`) |
 | OAuth sign-in (reuses `/auth/login` + refresh) | M3 | `word-addin/src/taskpane/auth.ts`; `web/src/routes/lq-ai/word-addin/oauth-start/` |
 | Learn viz | M3 | `web/static/learn/playgrounds/word-addin-flow.html` |
-| In-Word chat / skills (tracked changes + comments) / playbook execution | **deferred** | The three tabs render deep-link cards to the web app, not in-Word feature surfaces — [DE-287](PRD.md#9-deferred-enhancements-and-identified-future-work) |
+| **In-Word chat against the open document** | shipped (DE-287, partial: non-streaming; no in-doc citation highlighting yet) | `word-addin/src/taskpane/chatController.ts` + `components/ChatPane.tsx`; snapshot attach via `office.ts` + `lqApi.ts` (`file_ids` channel); tests in `word-addin/src/taskpane/__tests__/` |
+| **In-Word playbook execution (tracked changes + comments)** | shipped (DE-287, partial: batch apply after terminal poll; no per-position SSE or cost preview yet) | `word-addin/src/taskpane/playbookController.ts` + `redline.ts` + `components/PlaybookPane.tsx`; requires WordApi 1.4 (manifest) and DOCX ingest (ADR 0017) live in the deployment |
+| In-Word skills tab / Inference Tier badge | **deferred** | Skills tab still renders a deep-link card — [DE-287](PRD.md#9-deferred-enhancements-and-identified-future-work) |
 
-**Honest assessment:** the add-in is installable, authenticatable, and version-safe, but every substantive feature surface is a placeholder pointing to the web app. Do not market it as feature-shipped.
+**Honest assessment:** chat and playbook execution now act on the open document (upload-snapshot model: a .docx copy rides each chat turn and each playbook run — nothing streams the live selection yet). Word's 255-char search cap means some clause matches degrade to comments or a "missed" tally, which the summary reports rather than hides. The skills tab and tier badge remain placeholders. End-to-end verification in a real Word client is a manual checklist (stack + sideload), not CI.
 
 ### 4.4 Slack / Teams light intake bridge — partial
 
