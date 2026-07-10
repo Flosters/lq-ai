@@ -19,6 +19,7 @@ import { Header } from "./Header";
 import { TabStrip, type TabId } from "./TabStrip";
 import { DeepLinkCard } from "./DeepLinkCard";
 import { ChatPane } from "./ChatPane";
+import { PlaybookPane } from "./PlaybookPane";
 import { SignInGate } from "./SignInGate";
 import { UpdateNeededOverlay } from "./UpdateNeededOverlay";
 import { getSession, logout, type AuthSession } from "../auth";
@@ -127,6 +128,8 @@ export const App: React.FC = () => {
         )}
         {activeTab === "chat" ? (
           <ChatPane deploymentOrigin={deploymentOrigin} />
+        ) : activeTab === "playbooks" ? (
+          <PlaybookPane deploymentOrigin={deploymentOrigin} />
         ) : (
           <DeepLinkCard
             title={content.title}

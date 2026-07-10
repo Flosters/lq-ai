@@ -7,7 +7,6 @@
  * descoped to M4 / community contribution per DE-287) has the Office
  * context available without a separate readiness check.
  */
-import React from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./components/App";
 import "./taskpane.css";

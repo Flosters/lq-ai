@@ -503,3 +503,91 @@ button:focus-visible {
   margin: 0;
   font-size: 11px;
 }
+
+/* ---- Playbooks surface (DE-287) ---- */
+
+.lq-playbooks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lq-playbooks-intro {
+  font-size: 12px;
+  color: var(--lq-text-subtle);
+  margin: 0;
+}
+
+.lq-playbooks-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lq-playbooks-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--lq-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.lq-playbooks-name {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.lq-playbooks-type {
+  margin: 0;
+  font-size: 11px;
+  color: var(--lq-text-subtle);
+  text-transform: uppercase;
+}
+
+.lq-playbooks-run {
+  border: none;
+  border-radius: 6px;
+  background: var(--lq-accent);
+  color: #ffffff;
+  padding: 7px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.lq-playbooks-run:hover:not(:disabled) {
+  background: var(--lq-accent-hover);
+}
+
+.lq-playbooks-run:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.lq-playbooks-empty,
+.lq-playbooks-status {
+  font-size: 12px;
+  color: var(--lq-text-subtle);
+}
+
+.lq-playbooks-summary {
+  border: 1px solid var(--lq-border);
+  border-left: 3px solid var(--lq-accent);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.lq-playbooks-summary p {
+  margin: 0 0 4px;
+}
+
+.lq-playbooks-hint {
+  color: var(--lq-text-subtle);
+}
