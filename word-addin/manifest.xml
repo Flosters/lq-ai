@@ -49,6 +49,16 @@
     <Host Name="Document" />
   </Hosts>
 
+  <!-- WordApi 1.4 — required by the playbook redline applier (DE-287):
+       Range.insertComment and Document.changeTrackingMode ship in 1.4.
+       Word 2021+ / Microsoft 365 satisfy this; older clients see the
+       add-in as unavailable rather than failing at apply time. -->
+  <Requirements>
+    <Sets DefaultMinVersion="1.4">
+      <Set Name="WordApi" MinVersion="1.4" />
+    </Sets>
+  </Requirements>
+
   <DefaultSettings>
     <SourceLocation DefaultValue="{{ DEPLOYMENT_ORIGIN }}/word-addin/taskpane.html" />
   </DefaultSettings>
