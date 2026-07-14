@@ -1,5 +1,40 @@
 components:
   schemas:
+    ActaIn:
+      properties:
+        kind:
+          anyOf:
+          - maxLength: 60
+            type: string
+          - type: 'null'
+          title: Kind
+        model:
+          anyOf:
+          - maxLength: 200
+            type: string
+          - type: 'null'
+          title: Model
+        text:
+          maxLength: 200000
+          minLength: 1
+          title: Text
+          type: string
+      required:
+      - text
+      title: ActaIn
+      type: object
+    AdapterOut:
+      properties:
+        payload:
+          title: Payload
+        request_id:
+          title: Request Id
+          type: string
+      required:
+      - payload
+      - request_id
+      title: AdapterOut
+      type: object
     AdminUserListResponse:
       description: Paginated user list for ``GET /api/v1/admin/users``.
       properties:
@@ -4395,6 +4430,50 @@ components:
           title: Tags
       title: SavedPromptUpdate
       type: object
+    SearchDoc:
+      properties:
+        id:
+          maxLength: 64
+          title: Id
+          type: string
+        text:
+          maxLength: 8000
+          title: Text
+          type: string
+      required:
+      - id
+      - text
+      title: SearchDoc
+      type: object
+    SearchIn:
+      properties:
+        documents:
+          items:
+            $ref: '#/components/schemas/SearchDoc'
+          maxItems: 100
+          title: Documents
+          type: array
+        limit:
+          default: 3
+          maximum: 20.0
+          minimum: 1.0
+          title: Limit
+          type: integer
+        model:
+          anyOf:
+          - maxLength: 200
+            type: string
+          - type: 'null'
+          title: Model
+        query:
+          maxLength: 2000
+          minLength: 1
+          title: Query
+          type: string
+      required:
+      - query
+      title: SearchIn
+      type: object
     SearchRequest:
       additionalProperties: false
       properties:
@@ -5533,6 +5612,23 @@ components:
       - installed_at
       title: TeamsTenantSummary
       type: object
+    TextIn:
+      properties:
+        model:
+          anyOf:
+          - maxLength: 200
+            type: string
+          - type: 'null'
+          title: Model
+        text:
+          maxLength: 200000
+          minLength: 1
+          title: Text
+          type: string
+      required:
+      - text
+      title: TextIn
+      type: object
     TierConfigResponse:
       description: '``GET /inference/tier-config`` response — the operator''s tier
         policy.'
@@ -6430,6 +6526,29 @@ components:
       - addin_max_compatible_version
       - taskpane_bundle_url
       title: WordAddinVersionResponse
+      type: object
+    WorkflowIn:
+      properties:
+        model:
+          anyOf:
+          - maxLength: 200
+            type: string
+          - type: 'null'
+          title: Model
+        text:
+          maxLength: 200000
+          minLength: 1
+          title: Text
+          type: string
+        workflow:
+          maxLength: 60
+          minLength: 1
+          title: Workflow
+          type: string
+      required:
+      - text
+      - workflow
+      title: WorkflowIn
       type: object
     _FallbackEntry:
       description: One ``fallback`` list entry on an alias write.
@@ -11078,6 +11197,182 @@ paths:
       summary: Hybrid (vector + FTS) search over the knowledge base
       tags:
       - knowledge-bases
+  /api/v1/legvolution/check-acta:
+    post:
+      description: 'Checklist formal de un acta: ``[{key, severity, label, detail}]``.'
+      operationId: check_acta_api_v1_legvolution_check_acta_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActaIn'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterOut'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - OAuth2PasswordBearer: []
+      summary: Check Acta
+      tags:
+      - legvolution
+  /api/v1/legvolution/extract-appointments:
+    post:
+      description: 'Movimientos de autoridades en un acta: altas y ceses.
+
+
+        ``[{person_name, role, title, action, since, until}]`` con
+
+        ``role ∈ director|syndic|manager|attorney`` y ``action ∈ alta|cese``.'
+      operationId: extract_appointments_api_v1_legvolution_extract_appointments_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActaIn'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterOut'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - OAuth2PasswordBearer: []
+      summary: Extract Appointments
+      tags:
+      - legvolution
+  /api/v1/legvolution/extract-obligations:
+    post:
+      description: 'Obligaciones y vencimientos: ``[{description, due_date, label}]``.'
+      operationId: extract_obligations_api_v1_legvolution_extract_obligations_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TextIn'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterOut'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - OAuth2PasswordBearer: []
+      summary: Extract Obligations
+      tags:
+      - legvolution
+  /api/v1/legvolution/run-workflow:
+    post:
+      description: Ejecuta un workflow del catálogo del workbench legal.
+      operationId: run_workflow_api_v1_legvolution_run_workflow_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkflowIn'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterOut'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - OAuth2PasswordBearer: []
+      summary: Run Workflow
+      tags:
+      - legvolution
+  /api/v1/legvolution/semantic-search:
+    post:
+      description: 'Ranking semántico de documentos candidatos frente a una consulta.
+
+
+        ``[{id, score, snippet}]`` ordenado de mayor a menor relevancia.'
+      operationId: semantic_search_api_v1_legvolution_semantic_search_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchIn'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterOut'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - OAuth2PasswordBearer: []
+      summary: Semantic Search
+      tags:
+      - legvolution
+  /api/v1/legvolution/summarize-contract:
+    post:
+      description: 'Términos clave de un contrato: ``[{key, label, value}]``.'
+      operationId: summarize_contract_api_v1_legvolution_summarize_contract_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TextIn'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdapterOut'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - OAuth2PasswordBearer: []
+      summary: Summarize Contract
+      tags:
+      - legvolution
   /api/v1/mcp/oauth:
     get:
       description: 'GET /api/v1/mcp/oauth — per-user OAuth connection status for all

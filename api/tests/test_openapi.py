@@ -219,6 +219,14 @@ EXPECTED_PATHS: frozenset[str] = frozenset(
         "/api/v1/mcp/oauth",
         # PR5b Task 7 — resume pending tool call
         "/api/v1/chats/{chat_id}/tool-calls/{pending_call_id}",
+        # LegVolution adapter — analysis endpoints for the LegVolution
+        # platform's service account (extends the sketch)
+        "/api/v1/legvolution/summarize-contract",
+        "/api/v1/legvolution/extract-obligations",
+        "/api/v1/legvolution/extract-appointments",
+        "/api/v1/legvolution/check-acta",
+        "/api/v1/legvolution/run-workflow",
+        "/api/v1/legvolution/semantic-search",
     }
 )
 
@@ -342,7 +350,7 @@ async def test_openapi_paths_match_sketch() -> None:
     # Donna #3 adds two new paths (137 -> 139):
     # /api/v1/admin/tool-providers
     # /api/v1/admin/tool-providers/{provider_type}
-    assert len(actual) == 139
+    assert len(actual) == 145
 
 
 @pytest.mark.unit

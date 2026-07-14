@@ -341,6 +341,13 @@ IMPLEMENTED_ROUTES: set[tuple[str, str]] = {
     ("GET", "/api/v1/mcp/oauth"),
     # PR5b Task 7 — resume pending tool call
     ("POST", "/api/v1/chats/{chat_id}/tool-calls/{pending_call_id}"),
+    # LegVolution adapter — implemented endpoints (tests/test_legvolution.py)
+    ("POST", "/api/v1/legvolution/summarize-contract"),
+    ("POST", "/api/v1/legvolution/extract-obligations"),
+    ("POST", "/api/v1/legvolution/extract-appointments"),
+    ("POST", "/api/v1/legvolution/check-acta"),
+    ("POST", "/api/v1/legvolution/run-workflow"),
+    ("POST", "/api/v1/legvolution/semantic-search"),
 }
 
 
