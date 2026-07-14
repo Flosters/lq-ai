@@ -39,6 +39,7 @@ from app.api import (
     integrations_teams,
     internal,
     knowledge_bases,
+    legvolution,
     mcp_oauth,
     models,
     organization_profile,
@@ -135,6 +136,12 @@ api_router.include_router(word_addin.admin_router, dependencies=_active)
 # opinions, find-in-case). All five endpoints require an authenticated,
 # password-changed user; auth enforced via the _active dependency group.
 api_router.include_router(research.router, dependencies=_active)
+# LegVolution adapter — JSON-in/JSON-out analysis endpoints consumed by
+# the LegVolution legal platform's service account (summarize-contract,
+# extract-obligations, extract-appointments, check-acta, run-workflow,
+# semantic-search). Stateless wrappers over the gateway; auth via the
+# standard _active gate.
+api_router.include_router(legvolution.router, dependencies=_active)
 # WS2/PR4b — MCP registry admin surface (list, refresh, enable/disable).
 # Admin-gated at handler level via the AdminUser dependency; mounted
 # under _active so the bearer-token + must-change-password gates fire first.
