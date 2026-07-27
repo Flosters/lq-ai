@@ -56,9 +56,12 @@ from app.pipeline.parsers import (
     ParserDecodeError,
     ParserError,
     ParserUnsupported,
+    is_docx_filename,
+    is_docx_mime,
     is_pdf_mime,
     is_text_filename,
     is_text_mime,
+    parse_docx,
     parse_pdf,
     parse_text,
 )
@@ -156,19 +159,24 @@ async def ingest_file(
             error="soft_deleted",
         )
 
-    # ---- Resolve the parser route. PDF and plain-text/Markdown ride
-    # different branches. The browser-supplied MIME is unreliable for
-    # .md/.txt (often application/octet-stream or empty), so fall back to the
-    # filename extension when the MIME isn't already a text type. parse_text
-    # still validates the bytes (UTF-8, no NUL), so a binary file with a text
-    # name fails cleanly as decode_error rather than being trusted.
+    # ---- Resolve the parser route. PDF, plain-text/Markdown, and DOCX
+    # (ADR 0017) ride different branches. The browser-supplied MIME is
+    # unreliable for .md/.txt/.docx (often application/octet-stream or
+    # empty), so fall back to the filename extension when the MIME didn't
+    # already match a route. Both fallback parsers still validate the bytes
+    # (parse_text: UTF-8/no NUL; parse_docx: Pandoc rejects a non-OOXML
+    # package), so a mislabeled file fails cleanly as decode_error rather
+    # than being trusted.
     route_pdf = is_pdf_mime(row.mime_type)
     route_text = is_text_mime(row.mime_type) or (not route_pdf and is_text_filename(row.filename))
+    route_docx = is_docx_mime(row.mime_type) or (
+        not route_pdf and not route_text and is_docx_filename(row.filename)
+    )
 
     # ---- Reject unsupported types early. Log the MIME only — never the
     # filename (P3: counts/types/outcomes in logs, never user content; a
     # legal filename can itself be sensitive).
-    if not (route_pdf or route_text):
+    if not (route_pdf or route_text or route_docx):
         await _mark_failed(db, row, error="unsupported_type", reason=f"mime={row.mime_type!r}")
         return IngestResult(
             file_id=file_id,
@@ -219,6 +227,12 @@ async def ingest_file(
             # the decoded bytes are the canonical stream. Pure and fast, so
             # it skips the Docling thread/timeout machinery entirely.
             parsed = parse_text(raw_bytes)
+        elif route_docx:
+            # DOCX shells out to Pandoc (sync subprocess) — run off-loop.
+            # parse_docx enforces its own wall-clock budget on the
+            # subprocess (PANDOC_TIMEOUT_SECONDS, ADR 0017 §5), so the
+            # Docling soft-timeout machinery isn't needed here.
+            parsed = await asyncio.to_thread(parse_docx, raw_bytes)
         else:
             parsed = await asyncio.wait_for(
                 asyncio.to_thread(

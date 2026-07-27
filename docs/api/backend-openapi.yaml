@@ -1966,6 +1966,15 @@ paths:
         Per-request size limit: `LQ_AI_MAX_UPLOAD_SIZE_MB` (default 100 MB
         per Task C4). Exceeding it returns 413 with `code=payload_too_large`.
 
+        Ingest-supported formats (anything else reaches `failed` /
+        `unsupported_type`): PDF (`application/pdf` + common variants),
+        plain text / Markdown (`text/plain`, `text/markdown`,
+        `text/x-markdown`; `.md`/`.markdown`/`.txt` extension fallback for
+        generic MIMEs), and DOCX
+        (`application/vnd.openxmlformats-officedocument.wordprocessingml.document`;
+        `.docx` extension fallback — ADR 0017: tracked changes resolve to
+        the changes-accepted text, the revision layer is retained).
+
         `project_id` is accepted for forward compatibility (it appears in
         the multipart body) but is currently ignored; project attachment
         lands in C7. Files always start unattached and are linked to a
