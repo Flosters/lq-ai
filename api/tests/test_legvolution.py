@@ -15,12 +15,14 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.gateway import GatewayClient, get_gateway_client
 from app.db.session import get_db
 from app.main import app
 from app.models import User
+from app.models.audit import AuditLog
 from app.schemas.gateway import (
     ChatCompletionChoice,
     ChatCompletionMessage,
@@ -255,6 +257,141 @@ async def test_unparseable_model_output_is_502(db_session: AsyncSession, caller:
     gateway = _mock_gateway("Lo siento, no puedo analizar este documento.")
     resp = await _post(db_session, caller, gateway, "summarize-contract", {"text": "Contrato…"})
     assert resp.status_code == 502
+
+
+# --- trazabilidad: on_behalf_of en el audit log ---------------------------
+
+
+async def _audit_rows(db_session: AsyncSession) -> list[AuditLog]:
+    result = await db_session.execute(
+        select(AuditLog).where(AuditLog.resource_type == "legvolution").order_by(AuditLog.timestamp)
+    )
+    return list(result.scalars())
+
+
+@pytest.mark.integration
+async def test_on_behalf_of_lands_in_audit_log(db_session: AsyncSession, caller: User) -> None:
+    gateway = _mock_gateway(TERMS_JSON)
+    resp = await _post(
+        db_session,
+        caller,
+        gateway,
+        "summarize-contract",
+        {"text": "contrato de prueba", "on_behalf_of": "laura@empresa.com"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    (row,) = await _audit_rows(db_session)
+    assert row.action == "legvolution.summarize-contract"
+    assert row.user_id == caller.id
+    assert row.details["on_behalf_of"] == "laura@empresa.com"
+    assert row.details["request_id"] == resp.json()["request_id"]
+    # el request_id también va en la columna de primera clase, que es por
+    # donde se joinea contra el inference_routing_log del gateway
+    assert row.request_id == resp.json()["request_id"]
+    # el routing que reportó el gateway queda en las columnas que existen
+    # justamente para las filas que tocan inferencia
+    assert row.routed_inference_tier == 3
+    assert row.routed_provider == "anthropic-prod"
+
+
+@pytest.mark.integration
+async def test_audit_row_without_on_behalf_of_is_null(
+    db_session: AsyncSession, caller: User
+) -> None:
+    """Los caminos sin usuario (automatizaciones, jobs) omiten el campo.
+
+    La fila queda con ``on_behalf_of: null``, que es la verdad — no se
+    inventa un usuario ni se deja de auditar la inferencia.
+    """
+    gateway = _mock_gateway(TERMS_JSON)
+    resp = await _post(db_session, caller, gateway, "summarize-contract", {"text": "contrato"})
+    assert resp.status_code == 200, resp.text
+
+    (row,) = await _audit_rows(db_session)
+    assert row.details["on_behalf_of"] is None
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("path", "body", "expected_action"),
+    [
+        ("summarize-contract", {"text": "x"}, "legvolution.summarize-contract"),
+        ("extract-obligations", {"text": "x"}, "legvolution.extract-obligations"),
+        ("extract-appointments", {"text": "x"}, "legvolution.extract-appointments"),
+        ("check-acta", {"text": "x"}, "legvolution.check-acta"),
+        (
+            "run-workflow",
+            {"text": "x", "workflow": "doc_summary"},
+            "legvolution.run-workflow",
+        ),
+        (
+            "semantic-search",
+            {"query": "x", "documents": [{"id": "kb1", "text": "y"}]},
+            "legvolution.semantic-search",
+        ),
+    ],
+)
+async def test_every_endpoint_audits_with_its_own_action(
+    db_session: AsyncSession,
+    caller: User,
+    path: str,
+    body: dict,
+    expected_action: str,
+) -> None:
+    gateway = _mock_gateway("[]")
+    resp = await _post(db_session, caller, gateway, path, {**body, "on_behalf_of": "u@e.com"})
+    assert resp.status_code == 200, resp.text
+
+    (row,) = await _audit_rows(db_session)
+    assert row.action == expected_action
+    assert row.details["on_behalf_of"] == "u@e.com"
+
+
+@pytest.mark.integration
+async def test_semantic_search_without_candidates_writes_no_audit_row(
+    db_session: AsyncSession, caller: User
+) -> None:
+    """Sin candidatos no hay inferencia, y por lo tanto no hay fila.
+
+    Decisión explícita, no un olvido: el audit log del adaptador registra
+    inferencias ejecutadas. Una fila acá tendría un ``request_id`` sin
+    contraparte en el routing log del gateway — una correlación colgada que
+    engaña a quien joinee las dos tablas. Lo que el usuario pidió ya queda
+    auditado del lado de LegVolution.
+    """
+    gateway = _mock_gateway("[]")
+    resp = await _post(
+        db_session,
+        caller,
+        gateway,
+        "semantic-search",
+        {"query": "x", "documents": [], "on_behalf_of": "laura@empresa.com"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["payload"] == []
+    gateway.chat_completion.assert_not_called()
+    assert await _audit_rows(db_session) == []
+
+
+@pytest.mark.integration
+async def test_audit_row_survives_unparseable_output(
+    db_session: AsyncSession, caller: User
+) -> None:
+    """La inferencia corrió (y se pagó) aunque el JSON no parsee: se audita igual."""
+    gateway = _mock_gateway("no es JSON")
+    resp = await _post(
+        db_session,
+        caller,
+        gateway,
+        "summarize-contract",
+        {"text": "contrato", "on_behalf_of": "laura@empresa.com"},
+    )
+    assert resp.status_code == 502
+
+    (row,) = await _audit_rows(db_session)
+    assert row.details["on_behalf_of"] == "laura@empresa.com"
+    assert row.request_id == row.details["request_id"]
 
 
 @pytest.mark.integration

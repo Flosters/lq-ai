@@ -14,6 +14,12 @@ components:
             type: string
           - type: 'null'
           title: Model
+        on_behalf_of:
+          anyOf:
+          - maxLength: 200
+            type: string
+          - type: 'null'
+          title: On Behalf Of
         text:
           maxLength: 200000
           minLength: 1
@@ -4465,6 +4471,12 @@ components:
             type: string
           - type: 'null'
           title: Model
+        on_behalf_of:
+          anyOf:
+          - maxLength: 200
+            type: string
+          - type: 'null'
+          title: On Behalf Of
         query:
           maxLength: 2000
           minLength: 1
@@ -5620,6 +5632,12 @@ components:
             type: string
           - type: 'null'
           title: Model
+        on_behalf_of:
+          anyOf:
+          - maxLength: 200
+            type: string
+          - type: 'null'
+          title: On Behalf Of
         text:
           maxLength: 200000
           minLength: 1
@@ -6535,6 +6553,12 @@ components:
             type: string
           - type: 'null'
           title: Model
+        on_behalf_of:
+          anyOf:
+          - maxLength: 200
+            type: string
+          - type: 'null'
+          title: On Behalf Of
         text:
           maxLength: 200000
           minLength: 1

@@ -15,8 +15,14 @@ Design notes:
   LegVolution client maps any non-200 to its ``LQAIError`` and falls
   back to local heuristics, so an unparseable model output degrades
   gracefully instead of propagating garbage.
-* No rows are persisted here: the adapter is stateless; provenance
-  lives in the gateway's routing log keyed by the returned request_id.
+* Every executed inference writes one ``audit_log`` row — action
+  ``legvolution.<endpoint>``, resource_type ``legvolution`` — carrying
+  the ``request_id`` that also went to the gateway, the routing tier and
+  provider it reported back, and ``on_behalf_of``. LegVolution
+  authenticates as a single service account, so without that last field
+  lq-ai could not tell *which person* originated an inference; the
+  caller passes the real user's email and lq-ai records it. Calls with
+  no acting user (automations, jobs) leave it null, which is the truth.
 * Auth is the standard bearer token; LegVolution logs in with a service
   account via ``POST /api/v1/auth/login``.
 """
@@ -31,9 +37,12 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import ActiveUser
+from app.audit import audit_action
 from app.clients.gateway import GatewayClient, get_gateway_client
+from app.db.session import get_db
 from app.schemas.gateway import ChatCompletionMessage, ChatCompletionRequest
 
 log = logging.getLogger(__name__)
@@ -59,6 +68,8 @@ _SYSTEM_PREAMBLE = (
 class TextIn(BaseModel):
     text: str = Field(min_length=1, max_length=_TEXT_MAX)
     model: str | None = Field(default=None, max_length=200)
+    on_behalf_of: str | None = Field(default=None, max_length=200)
+    """Usuario de la plataforma llamadora en cuyo nombre se ejecuta (auditoría)."""
 
 
 class ActaIn(TextIn):
@@ -81,6 +92,8 @@ class SearchIn(BaseModel):
     documents: list[SearchDoc] = Field(default_factory=list, max_length=100)
     limit: int = Field(default=3, ge=1, le=20)
     model: str | None = Field(default=None, max_length=200)
+    on_behalf_of: str | None = Field(default=None, max_length=200)
+    """Usuario de la plataforma llamadora en cuyo nombre se ejecuta (auditoría)."""
 
 
 class AdapterOut(BaseModel):
@@ -114,7 +127,10 @@ def _parse_json_payload(raw_text: str) -> Any:
 async def _complete(
     gateway: GatewayClient,
     *,
+    db: AsyncSession,
     user_id: str,
+    action: str,
+    on_behalf_of: str | None,
     system: str,
     user_content: str,
     model: str | None,
@@ -131,6 +147,27 @@ async def _complete(
         lq_ai_user_id=user_id,
     )
     response = await gateway.chat_completion(gw_request, request_id=request_id)
+
+    # Auditar acá y no después de parsear: la inferencia ya corrió y ya se
+    # pagó, así que una salida impresentable (el 502 de abajo) tiene que
+    # dejar rastro igual.
+    row = await audit_action(
+        db,
+        user_id=uuid.UUID(user_id),
+        action=action,
+        resource_type="legvolution",
+        routed_inference_tier=response.routed_inference_tier,
+        routed_provider=response.routed_provider,
+        details={"on_behalf_of": on_behalf_of, "request_id": request_id},
+    )
+    # El request_id lo generamos nosotros, no viene en un header: el helper
+    # no puede leerlo, así que se completa la columna a mano. Es por donde
+    # se joinea contra el inference_routing_log del gateway.
+    row.request_id = request_id
+    # audit_action inserta y flushea pero no commitea; el adaptador no tiene
+    # otra transacción en vuelo, así que el commit va acá o la fila se pierde.
+    await db.commit()
+
     raw = response.choices[0].message.content if response.choices else ""
     payload = _parse_json_payload(raw if isinstance(raw, str) else "")
     return AdapterOut(payload=payload, request_id=request_id)
@@ -141,6 +178,7 @@ async def summarize_contract(
     body: TextIn,
     user: ActiveUser,
     gateway: Annotated[GatewayClient, Depends(get_gateway_client)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdapterOut:
     """Términos clave de un contrato: ``[{key, label, value}]``."""
     system = (
@@ -153,7 +191,10 @@ async def summarize_contract(
     )
     return await _complete(
         gateway,
+        db=db,
         user_id=str(user.id),
+        action="legvolution.summarize-contract",
+        on_behalf_of=body.on_behalf_of,
         system=system,
         user_content=body.text,
         model=body.model,
@@ -165,6 +206,7 @@ async def extract_obligations(
     body: TextIn,
     user: ActiveUser,
     gateway: Annotated[GatewayClient, Depends(get_gateway_client)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdapterOut:
     """Obligaciones y vencimientos: ``[{description, due_date, label}]``."""
     system = (
@@ -176,7 +218,10 @@ async def extract_obligations(
     )
     return await _complete(
         gateway,
+        db=db,
         user_id=str(user.id),
+        action="legvolution.extract-obligations",
+        on_behalf_of=body.on_behalf_of,
         system=system,
         user_content=body.text,
         model=body.model,
@@ -188,6 +233,7 @@ async def extract_appointments(
     body: ActaIn,
     user: ActiveUser,
     gateway: Annotated[GatewayClient, Depends(get_gateway_client)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdapterOut:
     """Movimientos de autoridades en un acta: altas y ceses.
 
@@ -209,7 +255,10 @@ async def extract_appointments(
     )
     return await _complete(
         gateway,
+        db=db,
         user_id=str(user.id),
+        action="legvolution.extract-appointments",
+        on_behalf_of=body.on_behalf_of,
         system=system,
         user_content=body.text,
         model=body.model,
@@ -221,6 +270,7 @@ async def check_acta(
     body: ActaIn,
     user: ActiveUser,
     gateway: Annotated[GatewayClient, Depends(get_gateway_client)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdapterOut:
     """Checklist formal de un acta: ``[{key, severity, label, detail}]``."""
     kind_hint = f"El documento es un {body.kind}. " if body.kind else ""
@@ -236,7 +286,10 @@ async def check_acta(
     )
     return await _complete(
         gateway,
+        db=db,
         user_id=str(user.id),
+        action="legvolution.check-acta",
+        on_behalf_of=body.on_behalf_of,
         system=system,
         user_content=body.text,
         model=body.model,
@@ -270,6 +323,7 @@ async def run_workflow(
     body: WorkflowIn,
     user: ActiveUser,
     gateway: Annotated[GatewayClient, Depends(get_gateway_client)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdapterOut:
     """Ejecuta un workflow del catálogo del workbench legal."""
     system = _WORKFLOW_PROMPTS.get(body.workflow)
@@ -280,7 +334,10 @@ async def run_workflow(
         )
     return await _complete(
         gateway,
+        db=db,
         user_id=str(user.id),
+        action="legvolution.run-workflow",
+        on_behalf_of=body.on_behalf_of,
         system=system,
         user_content=body.text,
         model=body.model,
@@ -292,6 +349,7 @@ async def semantic_search(
     body: SearchIn,
     user: ActiveUser,
     gateway: Annotated[GatewayClient, Depends(get_gateway_client)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ) -> AdapterOut:
     """Ranking semántico de documentos candidatos frente a una consulta.
 
@@ -310,7 +368,10 @@ async def semantic_search(
     user_content = f"Consulta:\n{body.query}\n\nDocumentos candidatos:\n\n{docs_block}"
     return await _complete(
         gateway,
+        db=db,
         user_id=str(user.id),
+        action="legvolution.semantic-search",
+        on_behalf_of=body.on_behalf_of,
         system=system,
         user_content=user_content,
         model=body.model,
