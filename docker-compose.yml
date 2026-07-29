@@ -369,54 +369,59 @@ services:
       retries: 6
 
   web:
-    # OpenWebUI fork imported at v0.9.2 per ADR 0001 (Task A1.d).
-    # Customizations land progressively: A5 (branding + delegated-auth wiring),
-    # D2 (tier badge), and others. The container builds upstream-as-is in M1's
-    # initial state.
+    # OpenWebUI fork (ADR 0001). NO se compila acá: el build pide
+    # NODE_OPTIONS=--max-old-space-size=4096 y la VM de OrbStack tiene 3.9 GB,
+    # así que se va a swap y no termina. Se usa la imagen publicada por el
+    # release workflow del upstream, pineada al tag que es ancestro de esta
+    # rama (ver docs/lqai-arranque.md en ~/legal-platform).
     #
-    # Word add-in (M3-B1) integration: the webpack build at
-    # `word-addin/` outputs to `web/static/word-addin/` which the web
-    # Dockerfile's `COPY . .` in the SvelteKit build stage picks up
-    # automatically. Run `cd word-addin && npm install && npm run build`
-    # once before `docker compose up --build` to populate the directory;
-    # see `word-addin/README.md` for the full build flow. A future DE
-    # may add an automated build stage to this compose file or to the
-    # web Dockerfile so the manual step is no longer required.
-    build:
-      context: ./web
-      dockerfile: Dockerfile
-      args:
-        # Vite/SvelteKit bakes PUBLIC_* env vars into the static build.
-        # Production deployments front web + api at the same origin via
-        # a reverse proxy and leave this UNSET (relative /api/v1).
-        # Local Compose dev sets it to http://localhost:8000/api/v1 in
-        # .env so the LQ.AI shell at :3000 can talk to the api at :8000.
-        PUBLIC_LQ_AI_API_BASE_URL: ${PUBLIC_LQ_AI_API_BASE_URL:-/api/v1}
+    # La imagen tiene PUBLIC_LQ_AI_API_BASE_URL=/lq/api/v1 horneada en el
+    # bundle (Vite lo inlinea en build time), así que NO es configurable acá:
+    # el servicio `proxy` de abajo es el que traduce ese prefijo.
+    image: ghcr.io/${LQ_AI_IMAGE_NAMESPACE:-legalquants}/lq-ai-web:${LQ_AI_IMAGE_TAG:-v0.6.1}
     restart: unless-stopped
     depends_on:
       api:
         condition: service_healthy
     environment:
-      # Backend delegation (per ADR 0002 — backend owns auth)
       LQ_AI_API_URL: ${LQ_AI_API_URL:-http://api:8000}
       WEBUI_AUTH: ${WEBUI_AUTH:-false}
       WEBUI_NAME: ${WEBUI_NAME:-LQ.AI}
       WEBUI_URL: ${WEBUI_URL:-http://localhost:3000}
-      # DE-353: LQ.AI does its own embeddings/citations in api+gateway; OpenWebUI's
-      # local RAG is unused. A non-empty engine makes get_ef() return None instead
-      # of building a local SentenceTransformer at import, skipping the boot-time
-      # "Fetching 30 files" HuggingFace download that otherwise delays web health.
+      # DE-353: el RAG local de OpenWebUI no se usa (lq-ai hace sus propios
+      # embeddings en api+gateway). Un engine no vacío evita la descarga de
+      # HuggingFace en el arranque, que si no demora el healthcheck.
       RAG_EMBEDDING_ENGINE: ${RAG_EMBEDDING_ENGINE:-openai}
-      # OpenWebUI's full env-var surface (DATABASE_URL, OLLAMA_BASE_URL,
-      # ENABLE_*, etc.) lands when Task A1.d imports the fork and we know
-      # the exact set to override vs. default.
-    ports:
-      - "${WEB_BIND_ADDR:-127.0.0.1}:${WEB_HOST_PORT:-3000}:8080"
+    # Sin puertos publicados: `web` es interno. El puerto de la cara visible
+    # lo tiene `proxy`.
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 20s
+
+  proxy:
+    # Pone el shell y la api en UN solo origen. El bundle de `web` llama a
+    # /lq/api/v1/*; este proxy le saca el /lq y lo manda a api:8000, y todo lo
+    # demás (el shell, /api/config, los /api/v1/* propios de OpenWebUI, ws,
+    # estáticos) va a web:8080. El prefijo /lq existe para no robarle a
+    # OpenWebUI su propio /api/config, que rompería el primer render.
+    image: ghcr.io/${LQ_AI_IMAGE_NAMESPACE:-legalquants}/lq-ai-proxy:${LQ_AI_IMAGE_TAG:-v0.6.1}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    ports:
+      - "${WEB_BIND_ADDR:-127.0.0.1}:${WEB_HOST_PORT:-3000}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   # ============================================================
   # Mode 2 — local inference (PRD §1.5.1, §6.1)
