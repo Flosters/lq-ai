@@ -319,3 +319,20 @@ def test_pseudonymize_returns_result_with_fresh_mapper() -> None:
 
     assert result.text == "PERSON_0001 signed."
     assert result.mapper.reverse() == {"PERSON_0001": "John Smith"}
+
+
+def test_languages_property_reflects_constructor_argument() -> None:
+    """``Anonymizer.languages`` exposes exactly what the caller configured.
+
+    This is the property the middleware reads once per request
+    (``_detect_request_language``) and that ``app.main`` / ``app.api.
+    inference`` are supposed to build from ``config.anonymization.
+    languages`` — not from ``DEFAULT_LANGUAGES``. A config knob that's
+    validated at load time and then silently ignored at construction
+    time is exactly the failure class this plan closes; this test pins
+    the property itself so that regression can't hide.
+    """
+
+    assert Anonymizer().languages == ("es", "en")
+    assert Anonymizer(languages=("es",)).languages == ("es",)
+    assert Anonymizer(languages=("en",)).languages == ("en",)

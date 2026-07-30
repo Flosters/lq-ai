@@ -70,3 +70,21 @@ async def test_ready_returns_200_when_config_loaded(client: AsyncClient) -> None
     # Both counters are populated from gateway.yaml.example
     assert body["providers"] >= 1
     assert body["aliases"] >= 1
+
+
+@pytest.mark.unit
+async def test_anonymizer_wired_with_configured_languages(gateway_app: FastAPI) -> None:
+    """The lifespan passes ``config.anonymization.languages`` into the Anonymizer.
+
+    ``gateway.yaml.example`` sets ``anonymization.languages: [en]`` — a
+    single language, different from ``Anonymizer``'s own constructor
+    default (``DEFAULT_LANGUAGES = ("es", "en")``). If the lifespan built
+    ``app.state.anonymizer`` with that default instead of reading the
+    config (the bug this test pins), ``.languages`` here would read
+    ``("es", "en")`` instead of ``("en",)`` and this test would catch it —
+    a config knob that validates and then does nothing is exactly the
+    failure class the anonimización-es plan exists to close.
+    """
+
+    anonymizer = gateway_app.state.anonymizer
+    assert anonymizer.languages == ("en",)

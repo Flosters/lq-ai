@@ -309,17 +309,26 @@ def _anonymizer(request: Request) -> Anonymizer:
     """Return the gateway's :class:`Anonymizer` (M2-B3).
 
     The lifespan installs a process-global :class:`Anonymizer` on
-    ``app.state.anonymizer`` whose spaCy backbone loads lazily on the
-    first :meth:`Anonymizer.pseudonymize_into` call. Tests that bypass
-    lifespan (or want to inject a stub analyzer) can override
-    ``app.state.anonymizer`` directly — same pattern as
-    ``app.state.routing_log``.
+    ``app.state.anonymizer``, built with ``config.anonymization.languages``
+    (see ``app.main``), whose spaCy backbone loads lazily on the first
+    :meth:`Anonymizer.pseudonymize_into` call. Tests that bypass lifespan
+    (or want to inject a stub analyzer) can override ``app.state.anonymizer``
+    directly — same pattern as ``app.state.routing_log``.
+
+    The fallback below (no pre-built instance) reads
+    ``config.anonymization.languages`` via :func:`_config` — the request's
+    ``config = _config(request)`` at the top of this endpoint already
+    resolved successfully by the time this runs, so the same accessor here
+    can't newly fail on this call path. This keeps the fallback honest to
+    the configured languages instead of silently reverting to
+    ``DEFAULT_LANGUAGES``, which is exactly the class of "config knob that
+    does nothing" bug this task closed for the lifespan path.
     """
 
     pre_built: Anonymizer | None = getattr(request.app.state, "anonymizer", None)
     if pre_built is not None:
         return pre_built
-    return Anonymizer()
+    return Anonymizer(languages=tuple(_config(request).anonymization.languages))
 
 
 def _inline_ref_to_skill(ref: InlineSkillRef) -> Skill:
