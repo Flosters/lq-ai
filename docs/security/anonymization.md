@@ -70,6 +70,9 @@ The gateway's `AnalyzerEngine` runs with this configuration (`gateway/app/anonym
 | `LOCATION` | Presidio default (spaCy NER) | Addresses, courthouses, jurisdictions. | Mapped to the `ADDRESS` pseudonym domain. |
 | `CASE_NUMBER` | **Custom** — `CaseNumberRecognizer` | Federal/state reporter cites (`Smith v. Jones, 123 F.3d 456 (9th Cir. 2024)`), `In re X` form, docket numbers (`Case No. 1:24-cv-00123`). | Requires structural anchoring; bare case captions intentionally not matched. |
 | `MATTER_NUMBER` | **Custom** — `MatterNumberRecognizer` | Alpha-year-sequence (`LQ-2026-0042`), dotted (`2026.0042`). | Deployment-specific; defaults are conservative — extend per the "Customizing" section below. |
+| `AR_TAX_ID` | **Custom** — `ArTaxIdRecognizer` | Argentine CUIT / CUIL (`CUIT 30-71234567-1`). | Label **and** module-11 check digit both required. See [Argentine identifiers](#argentine-identifiers). |
+| `AR_BANK_ACCOUNT` | **Custom** — `ArBankRecognizer` | Argentine CBU, 22 digits (`CBU 0170099255000000000123`). | Label **and** both BCRA block check digits required. |
+| `AR_DNI` | **Custom** — `ArDniRecognizer` | Argentine identity document (`DNI 27.345.678`, `L.C.`, `L.E.`). | Label-anchored only — no check digit exists. Unlabelled numbers are deliberately not matched. |
 
 ### Disabled by default
 
@@ -315,17 +318,49 @@ A Presidio-detected span that crosses line boundaries (common for address blocks
 
 Pinned by `gateway/tests/anonymization/test_edge_cases.py::test_pre_anonymize_multiline_entity_substitutes_across_newline` and `::test_post_anonymize_rehydrates_multiline_entity_with_newlines_preserved`.
 
-### Foreign-language entities — out of scope for v1
+### Multi-language entities — es + en (2026-07-30)
 
-Presidio's `AnalyzerEngine` ships with English-only NLP models per [`gateway/app/anonymization/engine.py::get_analyzer_engine`](../../gateway/app/anonymization/engine.py); the spaCy `en_core_web_lg` model is the only language pipeline registered. Non-English text in a chat or skill input is passed through the analyzer but typically produces zero entity matches — the content reaches the provider in cleartext.
+The layer splits into two halves with very different language sensitivity, and the split is what makes the design safe.
 
-**Operator implication:** for a deployment whose users send chat content in languages other than English, the anonymization layer effectively no-ops. Mitigations:
+**Pattern recognizers are language-independent.** Email, phone, and the Argentine identifiers below are pure regex — the language of the surrounding prose is irrelevant to them. They are registered under *every* configured language (`anonymization.languages`) so they fire unconditionally, whatever the language routing decides.
 
-1. Configure additional spaCy models per language (`pip install spacy && python -m spacy download xx_lg`) and extend `get_analyzer_engine` with per-language NLP engines.
-2. Disable anonymization entirely (`anonymization.enabled: false` in `gateway.yaml`) if the operator's privacy posture is incompatible with English-only detection.
-3. Route non-English content to a Tier-1 (local) inference path so the provider visibility question is moot.
+**The NER half is language-dependent.** `PERSON`, `ORGANIZATION` and `LOCATION` come from a spaCy model, and only one model analyzes a given text.
 
-No PRD §9 DE entry today — this is a project posture choice (English-only legal practice is the primary user persona) rather than a deferred enhancement. Operators with multi-language needs should open an issue.
+That split keeps language detection off the critical path: when it guesses wrong you lose name and company recall, but never a CUIT, CUIL, CBU, DNI, or email — the identifiers Ley 25.326 protects without argument.
+
+#### Detection is per request, not per message
+
+`_detect_request_language` in [`gateway/app/anonymization/middleware.py`](../../gateway/app/anonymization/middleware.py) joins every message the pre-pass is about to pseudonymize — excluding the retrieval-context message, which carries `lq_ai_skip_anonymization` and is not substituted — plus the string leaves of `lq_ai_skill_inputs`, and calls [`language_detect.detect_language`](../../gateway/app/anonymization/language_detect.py) **once**. That one language is threaded into every `pseudonymize_into` call for the request.
+
+This is correctness, not an optimization. Detecting per message let two messages of one request reach different spaCy models, which breaks the M2-C3 cross-message pseudonym-stability invariant: the same name in messages 1 and 5 must resolve to the same pseudonym, and two models produce different spans for the same name. Measured on three short English messages, `es_core_news_md` returned `'Discussing John Smith'`, then nothing, then `'John Smith'` — three answers for one entity. Pinned by `test_round_trip.py::test_cross_message_stability_in_pre_middleware` and `test_spanish_corpus.py::test_request_language_is_detected_once_for_all_messages`.
+
+#### The detector is deliberately biased toward Spanish
+
+The bias is measured, not assumed. Analyzing Spanish contract text with `en_core_web_lg` yields eight destructive false positives — `'por'` and `'en adelante'` as ORGANIZATION, `'LA'` as LOCATION (mangling the defined term `"LA LOCADORA"`), `'se celebra el presente'` as PERSON — and misses one of the two company names outright. The damage is not merely a missed entity: the prompt the model receives reads `"PERSON_0003 contrato"` instead of `"se celebra el presente contrato"`. Analyzing English text with `es_core_news_md` loses a single company name and produces no garbage. The costs run roughly 8:1, so English must win by a margin (`_MARGEN_INGLES`), not by a plurality, and a tie resolves to Spanish.
+
+Detection counts function words and takes no new dependency. The gateway is the egress boundary, and a word counter over legal prose does not justify adding supply-chain surface there. The weak case — very short chat messages — is covered by `test_language_detect.py::test_mensajes_cortos_de_chat`.
+
+#### Unioning both languages was tried and rejected
+
+An earlier design analyzed once per language and merged the spans, reasoning that over-detection is free because a false positive is a pseudonym that rehydration reverses. It is not free. `_resolve_overlaps` keeps the longest span, so the English model's `'Entre GONZÁLEZ HERMANOS S.A.'` (preposition glued on) beats the Spanish model's clean `'GONZÁLEZ HERMANOS S.A.'`, and every English false positive survives the merge. Union measured *worse* than simply picking the right model. Do not revive it.
+
+Costs, stated plainly: one spaCy model per configured language in the image, and **one NLP pass per request** — not one per language. Spanish ships as `es_core_news_md` (~40MB) rather than `es_core_news_lg` (~570MB), the size Presidio's own multilingual reference config uses. Whether `lg` is needed is an empirical question; `tests/anonymization/test_spanish_corpus.py` is where the evidence would come from.
+
+**Custom recognizers are registered once per language.** This is load-bearing and its failure is silent: `PatternRecognizer` defaults to `supported_language="en"`, so a recognizer registered a single time stops firing under any other language with no error raised. `get_analyzer_engine` loops over the language list for exactly this reason.
+
+**Operator note.** `anonymization.languages` defaults to `["en"]` so an existing deployment that upgrades without editing its `gateway.yaml` keeps its previous behavior. An Argentine deployment wants `[es, en]`. The resolved list is logged at gateway startup, which is how you confirm the setting took effect.
+
+### Argentine identifiers
+
+| Entity | Recognizer | Anchoring |
+|---|---|---|
+| `AR_TAX_ID` | `ArTaxIdRecognizer` | CUIT/CUIL label **and** module-11 check digit validated in `validate_result`. |
+| `AR_BANK_ACCOUNT` | `ArBankRecognizer` | CBU label **and** both BCRA blocks' check digits validated independently. |
+| `AR_DNI` | `ArDniRecognizer` | Label only (`DNI`, `D.N.I.`, `documento`, `L.C.`, `L.E.`) — no check digit exists for a DNI. |
+
+The two checksummed recognizers require both anchors because eleven or twenty-two bare digits in a contract are as likely to be an amount or a file number as an identifier; validating the arithmetic puts their false-positive rate near zero.
+
+`AR_DNI` deliberately does **not** match bare digit runs. `27.345.678` is typographically identical to a peso amount or a clause number, so matching by shape would pseudonymize every figure in a contract and render the text useless to the model. An unlabelled DNI therefore passes through in cleartext — a known, documented under-match, consistent with this layer's conservative posture and with the "what is NOT validated" section above.
 
 ### Citation extraction across chunk boundaries — see DE-277
 
