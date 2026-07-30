@@ -138,6 +138,10 @@ async def test_summarize_contract_returns_payload_and_request_id(
     (gw_request,) = gateway.chat_completion.call_args.args
     assert "JSON" in gw_request.messages[0].content
     assert gw_request.messages[1].content.startswith("Contrato de servicios")
+    # response_format viaja al gateway: es la señal que activa la
+    # rehidratación json_safe del lado del gateway (Task 6). Si esto se
+    # cae, el modo escapado deja de activarse en silencio.
+    assert gw_request.response_format == {"type": "json_object"}
 
 
 @pytest.mark.integration
