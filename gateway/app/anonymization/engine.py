@@ -24,9 +24,10 @@ path isn't built yet.
 Why a module-level singleton?
 -----------------------------
 
-Constructing an :class:`AnalyzerEngine` loads spaCy's
-``en_core_web_lg`` model (~560MB on disk, 2-3 seconds wall-clock).
-Doing that per-request would dominate gateway latency. The
+Constructing an :class:`AnalyzerEngine` loads a spaCy model per
+configured language (``en_core_web_lg`` is ~560MB on disk alone;
+see "Bilingual" below for the per-language breakdown). Doing that
+per-request would dominate gateway latency. The
 middleware allocates one mapper per request (in-process, drops on
 response) but **reuses the analyzer** across requests. Same pattern
 Presidio's own examples and FastAPI integrations follow.
@@ -138,10 +139,32 @@ ENABLED_DEFAULT_RECOGNIZERS: tuple[str, ...] = (
 #   references, and dotted numeric identifiers.
 # * ``MEDICAL_LICENSE`` — niche to healthcare practice areas; the
 #   shape collides with case numbers in unrelated corpora.
+# * ``EsNifRecognizer`` / ``EsNieRecognizer`` — Spain's tax ID and
+#   foreigner ID. Wrong jurisdiction for an Argentine corpus; these
+#   only exist in the registry because Presidio ships a different
+#   predefined set per language and ``es`` happens to include them
+#   (see the whole-branch review note below).
+# * ``UsItinRecognizer`` — US taxpayer ID. Not in the advertised
+#   entity set for this corpus; same as above, an artifact of the
+#   ``en`` predefined set rather than a deliberate inclusion.
+# * ``NhsRecognizer`` — UK National Health Service number. Wrong
+#   jurisdiction; same artifact of the ``en`` predefined set.
 #
 # Operators whose corpus benefits from these (e.g. a healthcare
 # practice that needs ``MEDICAL_LICENSE``) re-enable per-recognizer
 # in their deployment config; see ``docs/security/anonymization.md``.
+#
+# Why these last four are here and not just "not registered": Presidio's
+# ``load_predefined_recognizers`` returns a *different* default set per
+# language — ``es`` pulls in Spain's NIF/NIE, ``en`` pulls in US ITIN and
+# the UK NHS number, neither side sees the other's extras. Left alone,
+# enabling a language would silently add or remove entity types as a side
+# effect of routing, not a deliberate choice. Disabling them by name here
+# makes the enabled set language-invariant: whichever language(s) are
+# configured, the same recognizers exist. (Whole-branch review, 2026-07-30;
+# see also the ``UsBankRecognizer`` registration below, which fixes the
+# mirror-image problem — an entity advertised in the docs that stopped
+# firing under Spanish routing.)
 DISABLED_DEFAULT_RECOGNIZERS: tuple[str, ...] = (
     "UsPassportRecognizer",
     "UsLicenseRecognizer",
@@ -150,6 +173,10 @@ DISABLED_DEFAULT_RECOGNIZERS: tuple[str, ...] = (
     "IbanRecognizer",
     "IpRecognizer",
     "MedicalLicenseRecognizer",
+    "EsNifRecognizer",
+    "EsNieRecognizer",
+    "UsItinRecognizer",
+    "NhsRecognizer",
 )
 
 
@@ -184,6 +211,7 @@ def get_analyzer_engine(
 
     from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
     from presidio_analyzer.nlp_engine import NlpEngineProvider
+    from presidio_analyzer.predefined_recognizers import UsBankRecognizer
 
     nlp_engine = NlpEngineProvider(
         nlp_configuration={
@@ -212,6 +240,17 @@ def get_analyzer_engine(
         registry.add_recognizer(ArTaxIdRecognizer(supported_language=language))
         registry.add_recognizer(ArBankRecognizer(supported_language=language))
         registry.add_recognizer(ArDniRecognizer(supported_language=language))
+        # ``UsBankRecognizer`` is a pure pattern recognizer — its regex
+        # doesn't care what language the surrounding prose is in, so its
+        # relevance doesn't depend on language routing either. Presidio's
+        # predefined set only ships it under ``en``, though, which made the
+        # ``US_BANK_NUMBER`` entity documented in
+        # ``docs/security/anonymization.md`` silently stop firing whenever a
+        # text got routed to Spanish — a non-Argentine bank account number
+        # in Spanish prose would reach the provider in cleartext. Registering
+        # it explicitly per language, the same way the custom recognizers
+        # above are, closes that gap.
+        registry.add_recognizer(UsBankRecognizer(supported_language=language))
 
     engine = AnalyzerEngine(
         registry=registry,

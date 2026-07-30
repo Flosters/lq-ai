@@ -154,10 +154,10 @@ def test_deployed_config_anonymization_block_parses() -> None:
 
     assert config.anonymization.enabled is True
     assert config.anonymization.apply_at_tiers == [3, 4, 5]
-    # ``languages`` isn't a typed field yet — it only survives loading
-    # because ``AnonymizationConfig`` allows extras. ``getattr`` (rather
-    # than direct attribute access) documents that this is passthrough,
-    # not a schema guarantee.
+    # ``languages`` is now a typed ``list[str]`` field with its own
+    # validator (see ``AnonymizationConfig`` in ``config.py``), not a bare
+    # ``extra="allow"`` passthrough. ``getattr`` is kept here anyway so this
+    # assertion reads the same regardless of how the field is declared.
     assert getattr(config.anonymization, "languages", None) == ["es", "en"]
 
 

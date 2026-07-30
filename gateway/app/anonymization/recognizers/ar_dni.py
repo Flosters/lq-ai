@@ -35,10 +35,24 @@ _ETIQUETA = (
     r"|L\.?E\.?)"
 )
 
+# Ancla la etiqueta a un borde de palabra real. ``\b`` no alcanza: las
+# alternativas de dos letras (``L.C.``, ``L.E.``) empiezan con una letra, y
+# ``\b`` entre dos letras no es un borde — por eso "controLE", "detalLE",
+# "alquiLE" y "CALLE" matcheaban antes de este fix (ver hallazgo de la
+# revisión de rama: cualquier palabra terminada en "le"/"lc" seguida de un
+# número de 7-8 dígitos se detectaba como DNI). El lookbehind negativo exige
+# que lo que precede a la etiqueta no sea ni letra (con acentos/ñ) ni dígito.
+_SIN_LETRA_ANTES = r"(?<![0-9A-Za-zÁÉÍÓÚÜÑáéíóúüñ])"
+
 # Siete u ocho dígitos, con puntos de miles opcionales.
 _NUMERO = r"(?:\d{1,2}\.\d{3}\.\d{3}|\d{7,8})"
 
-_DNI_RE = rf"{_ETIQUETA}\s*(?:N[°º]?\s*)?:?\s*{_NUMERO}"
+# Lookahead negativo: sin esto, "DNI 123456789012" matchea sólo el prefijo
+# "DNI 12345678" y deja "9012" en claro. Exige que el número no siga con
+# otro dígito.
+_SIN_DIGITO_DESPUES = r"(?!\d)"
+
+_DNI_RE = rf"{_SIN_LETRA_ANTES}{_ETIQUETA}\s*(?:N[°º]?\s*)?:?\s*{_NUMERO}{_SIN_DIGITO_DESPUES}"
 
 
 class ArDniRecognizer(PatternRecognizer):

@@ -19,7 +19,7 @@ This section exists because LQ.AI's [founding transparency principle](../PRD.md#
 
 ### What is NOT validated
 
-**Presidio default-recognizer accuracy on legal-document corpus.** The Anonymization Layer enables 6 of Presidio's default recognizers (`PERSON`, `ORGANIZATION`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `US_BANK_NUMBER`, `LOCATION`) and disables 7 others (`UsSsnRecognizer`, `UsPassportRecognizer`, `UsLicenseRecognizer`, `CryptoRecognizer`, `IbanRecognizer`, `IpRecognizer`, `MedicalLicenseRecognizer`). The choices reflect engineering judgment about typical legal-document corpus, **not** empirical recall + precision measurements on a curated corpus of contracts, briefs, and correspondence.
+**Presidio default-recognizer accuracy on legal-document corpus.** The Anonymization Layer enables 6 of Presidio's default recognizers (`PERSON`, `ORGANIZATION`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `US_BANK_NUMBER`, `LOCATION`) and disables 11 others (`UsSsnRecognizer`, `UsPassportRecognizer`, `UsLicenseRecognizer`, `CryptoRecognizer`, `IbanRecognizer`, `IpRecognizer`, `MedicalLicenseRecognizer`, `EsNifRecognizer`, `EsNieRecognizer`, `UsItinRecognizer`, `NhsRecognizer`). The last four exist only because Presidio's `load_predefined_recognizers` ships a different default set per language — enabling Spanish for the Argentine corpus would otherwise have silently added Spain's NIF/NIE, and enabling English would silently add a US ITIN recognizer and the UK NHS number, none of which are the right jurisdiction here. Disabling them by name keeps the enabled set identical no matter which configured language a given request is routed to (`languages`, `gateway.yaml`) — see `test_enabled_recognizer_entities_are_language_invariant` in `gateway/tests/anonymization/test_engine_integration.py`. The remaining choices reflect engineering judgment about typical legal-document corpus, **not** empirical recall + precision measurements on a curated corpus of contracts, briefs, and correspondence.
 
 Specifically, the following are unmeasured:
 
@@ -66,7 +66,7 @@ The gateway's `AnalyzerEngine` runs with this configuration (`gateway/app/anonym
 | `ORGANIZATION` | Presidio default (spaCy NER) | Corporate entities, firms, agencies. | Surfaces under Presidio's `ORG` label internally. |
 | `EMAIL_ADDRESS` | Presidio default | Counsel email, party email in correspondence. | Requires a recognized TLD; `.example` test addresses won't match. |
 | `PHONE_NUMBER` | Presidio default | Contact numbers in correspondence. | US conventions catch best; international support varies. |
-| `US_BANK_NUMBER` | Presidio default | Bank account numbers in settlement statements, escrow docs. | Mapped to the `ACCOUNT_NUMBER` pseudonym domain so the operator's mental model is generic. |
+| `US_BANK_NUMBER` | Presidio default, registered explicitly per configured language | Bank account numbers in settlement statements, escrow docs. Also the only defense against a non-Argentine account number in Spanish prose — `AR_BANK_ACCOUNT` covers CBUs only. | Mapped to the `ACCOUNT_NUMBER` pseudonym domain so the operator's mental model is generic. Presidio's predefined set only ships this recognizer under `en`; the gateway registers it under every configured language itself so it fires regardless of which language a request gets routed to. |
 | `LOCATION` | Presidio default (spaCy NER) | Addresses, courthouses, jurisdictions. | Mapped to the `ADDRESS` pseudonym domain. |
 | `CASE_NUMBER` | **Custom** — `CaseNumberRecognizer` | Federal/state reporter cites (`Smith v. Jones, 123 F.3d 456 (9th Cir. 2024)`), `In re X` form, docket numbers (`Case No. 1:24-cv-00123`). | Requires structural anchoring; bare case captions intentionally not matched. |
 | `MATTER_NUMBER` | **Custom** — `MatterNumberRecognizer` | Alpha-year-sequence (`LQ-2026-0042`), dotted (`2026.0042`). | Deployment-specific; defaults are conservative — extend per the "Customizing" section below. |
@@ -87,6 +87,10 @@ These recognizers ship in Presidio's default set but produce a high false-positi
 | `IbanRecognizer` | IBAN bank identifiers | US-centric deployments rarely see them; when they do, `US_BANK_NUMBER` covers the use case. |
 | `IpRecognizer` | IPv4/IPv6 addresses | Incidental in evidence logs but extremely high false-positive rate against version numbers (`192.168.1.1` as a section reference), page references, and dotted numeric identifiers. |
 | `MedicalLicenseRecognizer` | Medical license numbers | Niche to healthcare practice areas; the shape collides with case numbers in unrelated corpora. |
+| `EsNifRecognizer` | Spain's NIF (tax ID) | Wrong jurisdiction for an Argentine corpus. Only appears in Presidio's predefined set because Spanish is a configured language; disabled explicitly so it doesn't fire regardless. |
+| `EsNieRecognizer` | Spain's NIE (foreigner ID) | Same reasoning as `EsNifRecognizer`. |
+| `UsItinRecognizer` | US Individual Taxpayer Identification Number | Not in the advertised entity set for this corpus; only appears because English is a configured language. |
+| `NhsRecognizer` | UK National Health Service number | Wrong jurisdiction; same artifact of the `en` predefined set. |
 
 A healthcare-practice deployment can re-enable `MedicalLicenseRecognizer` via the operator-customization pattern below.
 
@@ -108,8 +112,14 @@ DISABLED_DEFAULT_RECOGNIZERS: tuple[str, ...] = (
     "IbanRecognizer",
     "IpRecognizer",
     "MedicalLicenseRecognizer",  # ← remove this line for healthcare deployments
+    "EsNifRecognizer",
+    "EsNieRecognizer",
+    "UsItinRecognizer",
+    "NhsRecognizer",
 )
 ```
+
+The last four entries keep the enabled entity set language-invariant (see "What is NOT validated" above); removing them re-introduces a jurisdiction-mismatched recognizer rather than a healthcare-relevant one, so think twice before touching those four.
 
 The disabled list is currently a compile-time constant. A future task (M2-C3 or later) could surface it via `gateway.yaml` for runtime configuration.
 

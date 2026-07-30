@@ -128,6 +128,8 @@ class TestArDniRecognizer:
             "D.N.I. N° 27345678",
             "documento nacional de identidad 27.345.678",
             "L.C. 4.567.890",
+            "L.C. 4567890 al inicio de la oración",  # L.C. al comienzo del string
+            "el compareciente exhibe L.E. 4567890 vigente",  # L.E. tras un espacio
         ],
     )
     def test_detecta(self, recognizer, texto):
@@ -140,6 +142,17 @@ class TestArDniRecognizer:
             "el precio es de $27.345.678 más IVA",  # importe: el caso que importa
             "la cláusula 27.345 del reglamento",
             "27345678",  # ocho dígitos sueltos, sin etiqueta
+            # Falsos positivos de la revisión de rama: la etiqueta sin ancla
+            # izquierda matcheaba el sufijo "le"/"lc" de palabras comunes en
+            # prosa argentina, seguido de un número de 7-8 dígitos.
+            "segun el detalle 12345678 del anexo",
+            "se controle 12345678 unidades",
+            "el alquile 1234567 mensual",
+            "CALLE 12345678",
+            "conforme al detalle 27345678 adjunto",
+            # Corrida de dígitos más larga que un DNI: sin ancla derecha, esto
+            # matcheaba el prefijo "DNI 12345678" y dejaba "9012" en claro.
+            "DNI 123456789012",
         ],
     )
     def test_no_detecta(self, recognizer, texto):
