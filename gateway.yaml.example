@@ -455,6 +455,13 @@ rate_limits:
 anonymization:
   enabled: false  # M2 middleware shipped + runs; off by default — opt in per deployment
 
+  # Idiomas que el AnalyzerEngine carga y contra los que analiza cada texto.
+  # Cada idioma agrega un modelo de spaCy a la imagen y una pasada de NLP por
+  # request. El texto se analiza contra TODOS los idiomas listados y los
+  # hallazgos se unen: en anonimización sobre-detectar sale gratis (el
+  # seudónimo se revierte) y sub-detectar es un incidente de confidencialidad.
+  languages: [en]
+
   # Apply when:
   # - The request's routed tier is in apply_at_tiers, AND
   # - The user has not opted out for the request, AND
