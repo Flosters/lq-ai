@@ -228,8 +228,19 @@ def get_analyzer_engine(
 
     # Remove the noisy default recognizers (see
     # DISABLED_DEFAULT_RECOGNIZERS above for the per-name rationale).
+    #
+    # ``UsBankRecognizer`` se saca acá y se vuelve a registrar abajo, una vez
+    # por idioma. Presidio lo trae sólo bajo ``en``, así que dejarlo pasar y
+    # además registrarlo en el loop dejaba dos instancias para inglés: no
+    # rompe la salida —``_resolve_overlaps`` colapsa los spans repetidos— pero
+    # corre la misma regex dos veces por request y contradice la invariante de
+    # una instancia por idioma que el loop de abajo declara.
+    _RECONOCEDORES_A_REPONER_POR_IDIOMA = ("UsBankRecognizer",)
     registry.recognizers = [
-        r for r in registry.recognizers if type(r).__name__ not in DISABLED_DEFAULT_RECOGNIZERS
+        r
+        for r in registry.recognizers
+        if type(r).__name__ not in DISABLED_DEFAULT_RECOGNIZERS
+        and type(r).__name__ not in _RECONOCEDORES_A_REPONER_POR_IDIOMA
     ]
 
     # One instance per language. See the docstring: skipping the loop is a
