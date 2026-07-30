@@ -254,3 +254,6 @@ LAUNCH-POST.md
 
 # stack smoke failure diagnostics (scripts/stack-smoke.sh)
 stack-smoke-logs/
+
+# Worktrees aislados de trabajo (superpowers:using-git-worktrees)
+.worktrees/
