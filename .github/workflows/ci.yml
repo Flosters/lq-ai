@@ -141,6 +141,13 @@ jobs:
       - name: Install gateway package + dev extras
         run: pip install -e ".[dev]"
 
+      # The anonymization tests exercise real spaCy NER; the same two
+      # models the Dockerfiles bake in (en lg + es md).
+      - name: Install spaCy models (anonymization tests)
+        run: |
+          python -m spacy download en_core_web_lg
+          python -m spacy download es_core_news_md
+
       - name: ruff check
         working-directory: ${{ github.workspace }}
         run: ruff check gateway
