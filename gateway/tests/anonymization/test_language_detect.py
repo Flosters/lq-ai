@@ -82,6 +82,17 @@ def test_candidato_desconocido_se_ignora():
     assert detect_language("the of and to the", candidates=("en", "de")) == "en"
 
 
+def test_sin_candidatos_levanta():
+    """Config rota se grita, no se degrada.
+
+    Elegir un idioma por default con la lista vacía escondería un
+    ``anonymization.languages`` mal configurado — en esta capa un error
+    silencioso es una fuga, así que rompe fuerte.
+    """
+    with pytest.raises(ValueError, match="al menos un idioma"):
+        detect_language("cualquier cosa", candidates=())
+
+
 @pytest.mark.parametrize(
     "texto,esperado",
     [

@@ -122,7 +122,18 @@ def detect_language(text: str, *, candidates: tuple[str, ...]) -> str:
 
     Un candidato para el que no haya lista de funcionales no puede ganar por
     conteo — sólo se usa como fallback si es el único.
+
+    Levanta ``ValueError`` si ``candidates`` viene vacío. Es config rota, no
+    un caso a degradar en silencio: elegir un idioma por default acá
+    escondería un ``anonymization.languages`` mal configurado justo en la
+    capa donde un error silencioso es una fuga.
     """
+
+    if not candidates:
+        raise ValueError(
+            "detect_language necesita al menos un idioma candidato; "
+            "revisá anonymization.languages en gateway.yaml."
+        )
 
     if len(candidates) == 1:
         return candidates[0]
