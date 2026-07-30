@@ -8,6 +8,7 @@ real acá, así que el archivo puede vivir en el repo sin problema.
 import pytest
 
 from app.anonymization.engine import Anonymizer, _reset_analyzer_engine_for_tests
+from app.anonymization.language_detect import detect_language
 from app.anonymization.middleware import pre_anonymize_request
 from app.config import AnonymizationConfig
 from app.providers.openai_schema import ChatCompletionMessage, ChatCompletionRequest
@@ -57,6 +58,10 @@ def test_spanish_person_detected():
     assert "Ignacio Ferreyra Alcorta" not in result.text
     assert "PERSON_" in result.text
 
+    # El modelo inglés se comía esta frase como PERSON, dejándole al proveedor
+    # "PERSON_0003 contrato". Con el modelo correcto tiene que llegar entera.
+    assert "se celebra el presente contrato" in result.text
+
 
 @pytest.mark.slow
 def test_spanish_argentine_identifiers_detected():
@@ -91,6 +96,8 @@ def test_pattern_recognizers_still_fire_in_spanish():
 @pytest.mark.slow
 def test_english_still_works():
     """El inglés sigue funcionando: el detector lo elige y el modelo inglés corre."""
+    assert detect_language(CONTRACT_ENGLISH, candidates=("es", "en")) == "en"
+
     _reset_analyzer_engine_for_tests()
     result = Anonymizer().pseudonymize(CONTRACT_ENGLISH)
 
@@ -131,9 +138,9 @@ def test_request_language_is_detected_once_for_all_messages():
 
     mapper = pre_anonymize_request(
         chat_request=request,
-        config=AnonymizationConfig(enabled=True, apply_at_tiers=[3, 4, 5], languages=["es", "en"]),
+        config=AnonymizationConfig(enabled=True, apply_at_tiers=[3, 4, 5]),
         routed_tier=4,
-        anonymizer=Anonymizer(),
+        anonymizer=Anonymizer(languages=("es", "en")),
     )
 
     assert mapper is not None

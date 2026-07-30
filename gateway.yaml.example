@@ -455,11 +455,21 @@ rate_limits:
 anonymization:
   enabled: false  # M2 middleware shipped + runs; off by default — opt in per deployment
 
-  # Idiomas que el AnalyzerEngine carga y contra los que analiza cada texto.
-  # Cada idioma agrega un modelo de spaCy a la imagen y una pasada de NLP por
-  # request. El texto se analiza contra TODOS los idiomas listados y los
-  # hallazgos se unen: en anonimización sobre-detectar sale gratis (el
-  # seudónimo se revierte) y sub-detectar es un incidente de confidencialidad.
+  # Idiomas que el AnalyzerEngine carga. Cada uno agrega un modelo de spaCy
+  # a la imagen. El texto NO se analiza contra todos: se analiza contra uno.
+  #
+  # Los reconocedores de patrón —email, teléfono, CUIT, CUIL, CBU, DNI— se
+  # registran bajo todos los idiomas configurados y disparan siempre, sin
+  # depender de ninguna decisión de ruteo. Sólo la mitad NER (PERSON,
+  # ORGANIZATION, LOCATION) depende del modelo, y ahí un detector elige un
+  # idioma por request.
+  #
+  # El detector está sesgado al español porque los costos de equivocarse
+  # están medidos y son asimétricos: analizar español con el modelo inglés
+  # se come prosa común como si fueran entidades ('por' y 'en adelante' como
+  # ORGANIZATION, 'se celebra el presente' como PERSON), mientras que
+  # analizar inglés con el modelo español sólo pierde algún nombre de
+  # sociedad. Errar hacia el español sale ~8 veces más barato.
   languages: [en]
 
   # Apply when:

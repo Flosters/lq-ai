@@ -321,6 +321,7 @@ def test_pseudonymize_returns_result_with_fresh_mapper() -> None:
     assert result.mapper.reverse() == {"PERSON_0001": "John Smith"}
 
 
+@pytest.mark.unit
 def test_languages_property_reflects_constructor_argument() -> None:
     """``Anonymizer.languages`` exposes exactly what the caller configured.
 
