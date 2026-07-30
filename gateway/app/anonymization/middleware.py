@@ -33,6 +33,16 @@ The conditions are checked top-down; the first hit wins. The mapper
 is allocated only when all four conditions pass — when allocation
 fails we never persist anything, so a skipped request leaves the
 audit log clean.
+
+Language is detected once per request, not once per message
+(:func:`_detect_request_language`), and threaded through every
+``pseudonymize_into``/``_pseudonymize_strings`` call for that request.
+Detecting per message looked equivalent but wasn't: a short low-signal
+message analyzed alone can pick a different language than the rest of
+the same conversation, and two different spaCy models return different
+spans for the same name — breaking the M2-C3 cross-message pseudonym
+stability invariant. See :func:`_detect_request_language`'s docstring
+for the measured case that pinned this down.
 """
 
 from __future__ import annotations
