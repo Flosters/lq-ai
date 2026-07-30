@@ -69,7 +69,7 @@ class MatterNumberRecognizer(PatternRecognizer):
       restriction makes it implausible).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, supported_language: str = "en") -> None:
         patterns = [
             Pattern(
                 name="alpha_year_sequence",
@@ -86,4 +86,5 @@ class MatterNumberRecognizer(PatternRecognizer):
             supported_entity="MATTER_NUMBER",
             name="MatterNumberRecognizer",
             patterns=patterns,
+            supported_language=supported_language,
         )

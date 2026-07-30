@@ -20,6 +20,7 @@ from app.config_loader import ConfigLoadError, expand_env_vars, load_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_CONFIG = REPO_ROOT / "gateway.yaml.example"
+DEPLOYED_CONFIG = REPO_ROOT / "gateway.yaml"
 
 
 # --- expand_env_vars ----------------------------------------------------------
@@ -128,6 +129,36 @@ def test_load_config_parses_example(example_env: None) -> None:
     # citation-generating model. The api/ pulls this value over the
     # ``/v1/citation-engine/config`` endpoint at startup.
     assert config.citation_engine.judge_model == "fast"
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(
+    not DEPLOYED_CONFIG.exists(),
+    reason="gateway.yaml is git-ignored local deployment config; absent on fresh checkouts",
+)
+def test_deployed_config_anonymization_block_parses() -> None:
+    """Unit-level stand-in for ``docker compose up`` on the anonimizacion-es task.
+
+    We deliberately don't spin up the real gateway container for this repo's
+    local deployment config — that's this developer's running Docker stack,
+    not something a test run should touch. What we *can* verify without it:
+    that ``gateway.yaml``'s newly-added ``anonymization:`` block (Task 1 of
+    the anonimizacion-es plan) parses through the real loader with the
+    values the task turned on — tiers 3-5, enabled — and that the
+    not-yet-typed ``languages`` key survives via ``AnonymizationConfig``'s
+    ``extra="allow"`` instead of raising a ``ValidationError`` (Task 5 is
+    what starts reading it).
+    """
+
+    config = load_config(DEPLOYED_CONFIG)
+
+    assert config.anonymization.enabled is True
+    assert config.anonymization.apply_at_tiers == [3, 4, 5]
+    # ``languages`` is now a typed ``list[str]`` field with its own
+    # validator (see ``AnonymizationConfig`` in ``config.py``), not a bare
+    # ``extra="allow"`` passthrough. ``getattr`` is kept here anyway so this
+    # assertion reads the same regardless of how the field is declared.
+    assert getattr(config.anonymization, "languages", None) == ["es", "en"]
 
 
 @pytest.mark.unit

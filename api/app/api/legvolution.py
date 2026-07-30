@@ -145,6 +145,18 @@ async def _complete(
         stream=False,
         temperature=0.0,
         lq_ai_user_id=user_id,
+        # ``response_format`` viaja por ``extra="allow"`` y el adaptador de
+        # OpenAI (y cualquier otro proveedor compatible con OpenAI) lo
+        # reenvía tal cual y lo obedece. Los adaptadores nativos de Anthropic
+        # y Ollama arman su propio body con una lista de campos permitida y
+        # descartan ``response_format`` en silencio, así que ahí no cambia
+        # el comportamiento del proveedor — el JSON sigue llegando porque el
+        # preámbulo del sistema lo exige como respaldo. Lo que sí hace en
+        # todos los casos es avisarle al gateway que el ``content`` es JSON,
+        # que es lo que activa la rehidratación escapada. mypy no conoce
+        # ``extra="allow"`` (no hay plugin de pydantic acá) y trata el
+        # constructor como si sólo aceptara los campos declarados.
+        response_format={"type": "json_object"},  # type: ignore[call-arg]
     )
     response = await gateway.chat_completion(gw_request, request_id=request_id)
 

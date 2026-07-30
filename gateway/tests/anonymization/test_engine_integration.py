@@ -104,6 +104,63 @@ def test_engine_does_not_recognize_disabled_ip_address(analyzer: object) -> None
     assert "IP_ADDRESS" not in _hit_entity_types(results)
 
 
+def test_enabled_recognizer_entities_are_language_invariant(analyzer: object) -> None:
+    """The set of enabled entity types must be identical under every configured language.
+
+    Whole-branch review (2026-07-30) found that ``load_predefined_recognizers``
+    returns a *different* default set per language: enabling ``es`` pulled in
+    Spain's ``ES_NIF``/``ES_NIE`` (wrong jurisdiction for this Argentine
+    corpus), while ``en``-only recognizers like ``US_BANK_NUMBER`` —
+    advertised as enabled in ``docs/security/anonymization.md`` — silently
+    stopped firing whenever a text got routed to Spanish. Both problems are
+    invisible to a test that only calls ``analyze(language="en")``, which is
+    exactly why this test derives the entity sets straight from the engine's
+    registry instead of hardcoding either language's list: it fails the
+    moment any future recognizer appears on one side and not the other,
+    regardless of which side gains or loses it.
+    """
+
+    entities_by_language = {
+        language: set(analyzer.get_supported_entities(language=language))
+        for language in ("es", "en")
+    }
+
+    es_entities = entities_by_language["es"]
+    en_entities = entities_by_language["en"]
+
+    assert es_entities == en_entities, (
+        f"only under es: {es_entities - en_entities}; only under en: {en_entities - es_entities}"
+    )
+    # Guard against a vacuous pass (e.g. both empty because of a wiring bug
+    # upstream) — the curated set has real entities on both sides.
+    assert "US_BANK_NUMBER" in es_entities
+    assert "AR_DNI" in es_entities
+
+
+def test_no_recognizer_is_registered_twice_for_one_language(analyzer: object) -> None:
+    """Exactly one instance of each recognizer per configured language.
+
+    The entity-set parity test above cannot see this: ``get_supported_entities``
+    returns a set, so a recognizer registered twice for the same language looks
+    identical to one registered once. That is not hypothetical — restoring
+    ``US_BANK_NUMBER`` under Spanish first shipped as an extra
+    ``registry.add_recognizer`` on top of the instance Presidio already loads
+    under English, leaving two for ``en``. Nothing broke in the output
+    (``_resolve_overlaps`` collapses the repeated spans) so no test failed, but
+    the regex ran twice on every English request.
+    """
+
+    from collections import Counter
+
+    instancias = Counter(
+        (type(recognizer).__name__, recognizer.supported_language)
+        for recognizer in analyzer.registry.recognizers
+    )
+    repetidos = {clave: n for clave, n in instancias.items() if n > 1}
+
+    assert not repetidos, f"reconocedores registrados más de una vez: {repetidos}"
+
+
 def test_engine_combined_text_surfaces_multiple_entities(analyzer: object) -> None:
     """A realistic legal-prose paragraph surfaces all expected entity types."""
 

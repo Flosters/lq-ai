@@ -411,8 +411,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # no-cost startup hook even when the config disables the feature.
     # Tests override ``app.state.anonymizer`` to inject a stub analyzer
     # without touching the singleton.
-    app.state.anonymizer = Anonymizer()
-    logger.info("anonymization middleware wired (lazy analyzer load)")
+    #
+    # anonimización-es (Task 5): ``languages`` comes from
+    # ``config.anonymization.languages`` rather than the module default —
+    # an operator who sets ``languages: [es]`` in ``gateway.yaml`` needs
+    # that to actually change which spaCy models load. Wiring the default
+    # here silently would be the exact class of failure this plan closes:
+    # a config knob that validates cleanly and then does nothing. Logging
+    # the resolved languages is how the operator confirms it took effect.
+    app.state.anonymizer = Anonymizer(languages=tuple(config.anonymization.languages))
+    logger.info(
+        "anonymization middleware wired (lazy analyzer load, languages=%s)",
+        list(config.anonymization.languages),
+    )
 
     try:
         yield

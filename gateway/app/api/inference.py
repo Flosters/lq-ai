@@ -309,17 +309,26 @@ def _anonymizer(request: Request) -> Anonymizer:
     """Return the gateway's :class:`Anonymizer` (M2-B3).
 
     The lifespan installs a process-global :class:`Anonymizer` on
-    ``app.state.anonymizer`` whose spaCy backbone loads lazily on the
-    first :meth:`Anonymizer.pseudonymize_into` call. Tests that bypass
-    lifespan (or want to inject a stub analyzer) can override
-    ``app.state.anonymizer`` directly — same pattern as
-    ``app.state.routing_log``.
+    ``app.state.anonymizer``, built with ``config.anonymization.languages``
+    (see ``app.main``), whose spaCy backbone loads lazily on the first
+    :meth:`Anonymizer.pseudonymize_into` call. Tests that bypass lifespan
+    (or want to inject a stub analyzer) can override ``app.state.anonymizer``
+    directly — same pattern as ``app.state.routing_log``.
+
+    The fallback below (no pre-built instance) reads
+    ``config.anonymization.languages`` via :func:`_config` — the request's
+    ``config = _config(request)`` at the top of this endpoint already
+    resolved successfully by the time this runs, so the same accessor here
+    can't newly fail on this call path. This keeps the fallback honest to
+    the configured languages instead of silently reverting to
+    ``DEFAULT_LANGUAGES``, which is exactly the class of "config knob that
+    does nothing" bug this task closed for the lifespan path.
     """
 
     pre_built: Anonymizer | None = getattr(request.app.state, "anonymizer", None)
     if pre_built is not None:
         return pre_built
-    return Anonymizer()
+    return Anonymizer(languages=tuple(_config(request).anonymization.languages))
 
 
 def _inline_ref_to_skill(ref: InlineSkillRef) -> Skill:
@@ -652,6 +661,11 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
         anonymizer=anonymizer,
     )
 
+    # ``response_format`` llega por ``extra="allow"``: si el caller pidió
+    # salida estructurada, el ``content`` que vuelve es un JSON serializado y
+    # la rehidratación tiene que escapar los originales.
+    anon_json_safe = bool((chat_request.model_extra or {}).get("response_format"))
+
     # --- Streaming path -----------------------------------------------------
     if chat_request.stream:
         return await _stream_with_fallback(
@@ -663,6 +677,7 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
             applied_skills=applied_skills,
             anon_mapper=anon_mapper,
             anonymizer=anonymizer,
+            anon_json_safe=anon_json_safe,
         )
 
     # --- Non-streaming path -------------------------------------------------
@@ -730,7 +745,10 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
         # then dropped on function exit — never persisted, never logged.
         if anon_mapper is not None:
             post_anonymize_response(
-                response=result.response, mapper=anon_mapper, anonymizer=anonymizer
+                response=result.response,
+                mapper=anon_mapper,
+                anonymizer=anonymizer,
+                json_safe=anon_json_safe,
             )
 
         # --- Success: stamp tier on body, write log, return --------------------
@@ -1057,6 +1075,7 @@ async def _stream_with_fallback(
     applied_skills: list[str] | None = None,
     anon_mapper: PseudonymMapper | None = None,
     anonymizer: Anonymizer | None = None,
+    anon_json_safe: bool = False,
 ) -> StreamingResponse:
     """Run the streaming path with primary + fallback chain.
 
@@ -1142,6 +1161,7 @@ async def _stream_with_fallback(
             applied_skills=applied_skills or [],
             anon_mapper=anon_mapper,
             anonymizer=anonymizer,
+            anon_json_safe=anon_json_safe,
         ),
         media_type="text/event-stream",
         headers={
@@ -1164,6 +1184,7 @@ async def _stream_openai_sse(
     applied_skills: list[str] | None = None,
     anon_mapper: PseudonymMapper | None = None,
     anonymizer: Anonymizer | None = None,
+    anon_json_safe: bool = False,
 ) -> AsyncIterator[bytes]:
     """Serialize chunks as OpenAI-format SSE frames; write log on completion.
 
@@ -1178,7 +1199,9 @@ async def _stream_openai_sse(
     last_chunk: ChatCompletionChunk | None = None
     rehydrator: StreamingRehydrator | None = None
     if anon_mapper is not None and anonymizer is not None:
-        rehydrator = StreamingRehydrator(mapper=anon_mapper, anonymizer=anonymizer)
+        rehydrator = StreamingRehydrator(
+            mapper=anon_mapper, anonymizer=anonymizer, json_safe=anon_json_safe
+        )
 
     try:
         async for chunk in chunks:

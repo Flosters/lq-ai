@@ -23,6 +23,7 @@ middleware into the FastAPI app and mocks the provider.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 import pytest
@@ -541,6 +542,28 @@ def test_post_anonymize_preserves_non_content_fields() -> None:
     assert response.anonymization_applied is True
 
 
+@pytest.mark.unit
+def test_post_anonymize_json_safe_escapes_dangerous_original() -> None:
+    """``json_safe=True`` escapes the original so the JSON content stays parseable.
+
+    LegVolution's endpoints send ``response_format`` and get back a JSON
+    document whose pseudonym sits inside a string literal. An original
+    containing a quote would otherwise splice unescaped into that literal
+    and break the document — this is the bug Task 6 fixes.
+    """
+
+    mapper = PseudonymMapper()
+    mapper.assign("PERSON", 'Juan "Pepe" Pérez')  # → PERSON_0001
+    response = _make_response(contents=[json.dumps({"parte": "PERSON_0001"})])
+
+    post_anonymize_response(
+        response=response, mapper=mapper, anonymizer=Anonymizer(), json_safe=True
+    )
+
+    parsed = json.loads(response.choices[0].message.content)
+    assert parsed["parte"] == 'Juan "Pepe" Pérez'
+
+
 # ---------------------------------------------------------------------------
 # StreamingRehydrator — incremental tail-buffer rehydration (Decision B (i)).
 #
@@ -601,6 +624,29 @@ def test_streaming_rehydrator_pseudonym_split_across_chunks() -> None:
     out = r.process("Hello PERSON_") + r.process("0001") + r.process(" signed.") + r.flush()
 
     assert out == "Hello John Smith signed."
+
+
+@pytest.mark.unit
+def test_streaming_rehydrator_json_safe_escapes_split_pseudonym() -> None:
+    """``json_safe=True`` still escapes correctly when the pseudonym straddles chunks.
+
+    Mirrors :func:`test_streaming_rehydrator_pseudonym_split_across_chunks`
+    (``PERSON_`` | ``0001`` | tail, held until the tail crystallizes it) but
+    the original contains a quote — a character JSON must escape — and the
+    surrounding text is itself a JSON string literal. Buffering plus
+    escaping is the one interaction this task introduces that the direct
+    ``Anonymizer.rehydrate`` tests don't exercise: the pseudonym is still
+    incomplete (and therefore not yet substituted) when the tail-buffer
+    logic makes its hold/emit decision, so escaping only ever applies to
+    the fully-resolved substitution, never to a partial one.
+    """
+
+    mapper = _mapper_with(("PERSON", 'Juan "Pepe" Pérez'))  # → PERSON_0001
+    r = StreamingRehydrator(mapper=mapper, anonymizer=Anonymizer(), json_safe=True)
+
+    out = r.process('{"parte": "PERSON_') + r.process("0001") + r.process('"}') + r.flush()
+
+    assert json.loads(out)["parte"] == 'Juan "Pepe" Pérez'
 
 
 @pytest.mark.unit

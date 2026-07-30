@@ -33,6 +33,16 @@ The conditions are checked top-down; the first hit wins. The mapper
 is allocated only when all four conditions pass — when allocation
 fails we never persist anything, so a skipped request leaves the
 audit log clean.
+
+Language is detected once per request, not once per message
+(:func:`_detect_request_language`), and threaded through every
+``pseudonymize_into``/``_pseudonymize_strings`` call for that request.
+Detecting per message looked equivalent but wasn't: a short low-signal
+message analyzed alone can pick a different language than the rest of
+the same conversation, and two different spaCy models return different
+spans for the same name — breaking the M2-C3 cross-message pseudonym
+stability invariant. See :func:`_detect_request_language`'s docstring
+for the measured case that pinned this down.
 """
 
 from __future__ import annotations
@@ -41,6 +51,7 @@ import re
 from typing import Any
 
 from app.anonymization.engine import Anonymizer
+from app.anonymization.language_detect import detect_language
 from app.anonymization.mapper import PseudonymMapper
 from app.config import AnonymizationConfig
 from app.observability_helpers import get_tracer, record_attributes, traced
@@ -57,6 +68,48 @@ __all__ = [
 # generated. ``tool`` messages carry tool-call payloads and shouldn't
 # be pseudonymized — those are structured outputs, not natural prose.
 _ANONYMIZED_ROLES: frozenset[str] = frozenset({"user", "assistant", "system"})
+
+
+def _collect_strings(value: Any) -> list[str]:
+    """Junta las hojas de tipo ``str`` de una estructura JSON-shaped."""
+
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _collect_strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _collect_strings(v)]
+    return []
+
+
+def _detect_request_language(chat_request: ChatCompletionRequest, anonymizer: Anonymizer) -> str:
+    """Idioma del request completo: se junta todo el texto y se detecta una vez.
+
+    Por request y no por mensaje, y esto es correctitud, no optimización. Un
+    request de chat es una conversación en un idioma; detectando por mensaje,
+    un ``"OK"`` y un contrato de cuarenta páginas del mismo request pueden ir
+    a modelos distintos. Eso rompe la invariante M2-C3 de estabilidad de
+    seudónimos —el mismo nombre en dos mensajes tiene que dar el mismo
+    seudónimo— porque dos modelos detectan spans distintos sobre el mismo
+    nombre. Medido: ``es_core_news_md`` sobre tres mensajes cortos en inglés
+    devuelve ``'Discussing John Smith'``, nada, y ``'John Smith'`` — tres
+    respuestas para una sola entidad.
+
+    Se juntan los mismos textos que después se van a seudonimizar: los
+    mensajes que el pre-pass toca (sin el de contexto de retrieval, que lleva
+    la marca de skip) más las hojas string de ``lq_ai_skill_inputs``.
+    """
+
+    partes: list[str] = [
+        message.content
+        for message in chat_request.messages
+        if message.role in _ANONYMIZED_ROLES
+        and message.content
+        and not getattr(message, "lq_ai_skip_anonymization", False)
+    ]
+    if chat_request.lq_ai_skill_inputs:
+        partes.extend(_collect_strings(chat_request.lq_ai_skill_inputs))
+    return detect_language("\n".join(partes), candidates=anonymizer.languages)
 
 
 def pre_anonymize_request(
@@ -108,6 +161,7 @@ def pre_anonymize_request(
             return None
 
         mapper = PseudonymMapper()
+        language = _detect_request_language(chat_request, anonymizer)
 
         for message in chat_request.messages:
             if message.role not in _ANONYMIZED_ROLES:
@@ -123,12 +177,14 @@ def pre_anonymize_request(
             # still get pseudonymized normally.
             if getattr(message, "lq_ai_skip_anonymization", False):
                 continue
-            message.content = anonymizer.pseudonymize_into(message.content, mapper)
+            message.content = anonymizer.pseudonymize_into(
+                message.content, mapper, language=language
+            )
 
         if chat_request.lq_ai_skill_inputs:
             for skill_name, inputs in chat_request.lq_ai_skill_inputs.items():
                 chat_request.lq_ai_skill_inputs[skill_name] = _pseudonymize_strings(
-                    inputs, anonymizer=anonymizer, mapper=mapper
+                    inputs, anonymizer=anonymizer, mapper=mapper, language=language
                 )
 
         counts = mapper.entity_counts()
@@ -186,11 +242,18 @@ class StreamingRehydrator:
       the regex scan.
     """
 
-    __slots__ = ("_anonymizer", "_buffer", "_mapper")
+    __slots__ = ("_anonymizer", "_buffer", "_json_safe", "_mapper")
 
-    def __init__(self, *, mapper: PseudonymMapper, anonymizer: Anonymizer) -> None:
+    def __init__(
+        self,
+        *,
+        mapper: PseudonymMapper,
+        anonymizer: Anonymizer,
+        json_safe: bool = False,
+    ) -> None:
         self._mapper = mapper
         self._anonymizer = anonymizer
+        self._json_safe = json_safe
         self._buffer: str = ""
 
     def process(self, chunk: str) -> str:
@@ -213,14 +276,14 @@ class StreamingRehydrator:
 
         if not emit_raw:
             return ""
-        return self._anonymizer.rehydrate(emit_raw, self._mapper)
+        return self._anonymizer.rehydrate(emit_raw, self._mapper, json_safe=self._json_safe)
 
     def flush(self) -> str:
         """Emit whatever's in the tail, rehydrated. Clears the buffer."""
 
         if not self._buffer:
             return ""
-        out = self._anonymizer.rehydrate(self._buffer, self._mapper)
+        out = self._anonymizer.rehydrate(self._buffer, self._mapper, json_safe=self._json_safe)
         self._buffer = ""
         return out
 
@@ -231,6 +294,7 @@ def post_anonymize_response(
     response: ChatCompletionResponse,
     mapper: PseudonymMapper,
     anonymizer: Anonymizer,
+    json_safe: bool = False,
 ) -> None:
     """Rehydrate each choice's message content in place.
 
@@ -240,6 +304,11 @@ def post_anonymize_response(
     are left alone. Non-content fields (role, finish_reason, usage,
     routing metadata) are untouched.
 
+    ``json_safe=True`` when the caller requested structured output
+    (``response_format``) — the ``content`` is then a serialized JSON
+    document and each original must be escaped before substitution. See
+    :meth:`Anonymizer.rehydrate`.
+
     Per Decision D: the gateway rehydrates response *content* only.
     Citation rehydration happens downstream in the api/'s citation
     extraction, which operates on the already-rehydrated content.
@@ -248,10 +317,14 @@ def post_anonymize_response(
     for choice in response.choices:
         if choice.message.content is None:
             continue
-        choice.message.content = anonymizer.rehydrate(choice.message.content, mapper)
+        choice.message.content = anonymizer.rehydrate(
+            choice.message.content, mapper, json_safe=json_safe
+        )
 
 
-def _pseudonymize_strings(value: Any, *, anonymizer: Anonymizer, mapper: PseudonymMapper) -> Any:
+def _pseudonymize_strings(
+    value: Any, *, anonymizer: Anonymizer, mapper: PseudonymMapper, language: str
+) -> Any:
     """Recursively pseudonymize string leaves; pass other types through.
 
     Skill-input values are arbitrary JSON-shaped (dict/list/str/int/
@@ -259,15 +332,22 @@ def _pseudonymize_strings(value: Any, *, anonymizer: Anonymizer, mapper: Pseudon
     worth pseudonymizing; numbers and booleans aren't entities the
     analyzer recognizes anyway and round-tripping them through the
     analyzer would just waste cycles.
+
+    ``language`` is the once-per-request language from
+    ``_detect_request_language`` — propagated through the recursion so
+    every leaf in one request analyzes against the same model.
     """
 
     if isinstance(value, str):
-        return anonymizer.pseudonymize_into(value, mapper)
+        return anonymizer.pseudonymize_into(value, mapper, language=language)
     if isinstance(value, dict):
         return {
-            k: _pseudonymize_strings(v, anonymizer=anonymizer, mapper=mapper)
+            k: _pseudonymize_strings(v, anonymizer=anonymizer, mapper=mapper, language=language)
             for k, v in value.items()
         }
     if isinstance(value, list):
-        return [_pseudonymize_strings(v, anonymizer=anonymizer, mapper=mapper) for v in value]
+        return [
+            _pseudonymize_strings(v, anonymizer=anonymizer, mapper=mapper, language=language)
+            for v in value
+        ]
     return value
