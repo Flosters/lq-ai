@@ -60,6 +60,7 @@ detector mistake never costs an identifier.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -370,18 +371,27 @@ class Anonymizer:
             out = out[: span.start] + pseudonym + out[span.end :]
         return out
 
-    def rehydrate(self, text: str, mapper: PseudonymMapper) -> str:
+    def rehydrate(self, text: str, mapper: PseudonymMapper, *, json_safe: bool = False) -> str:
         """Walk pseudonyms in ``text`` and substitute originals.
 
-        One pass over ``mapper.reverse()`` items, ``str.replace`` for
-        each pseudonym ordered by descending length. The ordering is
-        load-bearing: without it a shorter pseudonym (``PERSON_0001``)
-        would match-and-replace inside a longer one (``PERSON_00010``)
-        and mangle the output.
+        One pass over ``mapper.reverse()`` items, ``str.replace`` for each
+        pseudonym ordered by descending length. The ordering is load-bearing:
+        without it a shorter pseudonym (``PERSON_0001``) would
+        match-and-replace inside a longer one (``PERSON_00010``) and mangle
+        the output.
 
-        Empty mapper, empty text, and text containing no pseudonyms
-        all return cleanly (an empty ``reverse()`` table makes the
-        loop a no-op).
+        ``json_safe=True`` is for responses whose ``content`` is a serialized
+        JSON document (any request carrying ``response_format``). There the
+        pseudonym sits *inside* a JSON string literal, so splicing a raw
+        original that contains ``"``, ``\\`` or a newline produces a document
+        that no longer parses — and a multi-line address block, which this
+        layer explicitly supports detecting, is exactly that case. In that
+        mode each original is escaped with the JSON string rules before
+        substitution, so ``json.loads`` on the result yields the original
+        byte-for-byte.
+
+        Empty mapper, empty text, and text containing no pseudonyms all
+        return cleanly (an empty ``reverse()`` table makes the loop a no-op).
         """
 
         if not text:
@@ -389,7 +399,8 @@ class Anonymizer:
         for pseudonym, original in sorted(
             mapper.reverse().items(), key=lambda kv: len(kv[0]), reverse=True
         ):
-            text = text.replace(pseudonym, original)
+            replacement = json.dumps(original)[1:-1] if json_safe else original
+            text = text.replace(pseudonym, replacement)
         return text
 
 

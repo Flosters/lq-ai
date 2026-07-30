@@ -145,6 +145,14 @@ async def _complete(
         stream=False,
         temperature=0.0,
         lq_ai_user_id=user_id,
+        # ``response_format`` viaja por ``extra="allow"`` y el adaptador de
+        # OpenAI lo reenvía tal cual. Sirve para dos cosas: el proveedor deja
+        # de tener que obedecer el prompt para devolver JSON, y el gateway
+        # se entera de que el ``content`` es JSON, que es lo que activa la
+        # rehidratación escapada. mypy no conoce ``extra="allow"`` (no hay
+        # plugin de pydantic acá) y trata el constructor como si sólo
+        # aceptara los campos declarados.
+        response_format={"type": "json_object"},  # type: ignore[call-arg]
     )
     response = await gateway.chat_completion(gw_request, request_id=request_id)
 

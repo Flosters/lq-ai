@@ -242,11 +242,18 @@ class StreamingRehydrator:
       the regex scan.
     """
 
-    __slots__ = ("_anonymizer", "_buffer", "_mapper")
+    __slots__ = ("_anonymizer", "_buffer", "_json_safe", "_mapper")
 
-    def __init__(self, *, mapper: PseudonymMapper, anonymizer: Anonymizer) -> None:
+    def __init__(
+        self,
+        *,
+        mapper: PseudonymMapper,
+        anonymizer: Anonymizer,
+        json_safe: bool = False,
+    ) -> None:
         self._mapper = mapper
         self._anonymizer = anonymizer
+        self._json_safe = json_safe
         self._buffer: str = ""
 
     def process(self, chunk: str) -> str:
@@ -269,14 +276,14 @@ class StreamingRehydrator:
 
         if not emit_raw:
             return ""
-        return self._anonymizer.rehydrate(emit_raw, self._mapper)
+        return self._anonymizer.rehydrate(emit_raw, self._mapper, json_safe=self._json_safe)
 
     def flush(self) -> str:
         """Emit whatever's in the tail, rehydrated. Clears the buffer."""
 
         if not self._buffer:
             return ""
-        out = self._anonymizer.rehydrate(self._buffer, self._mapper)
+        out = self._anonymizer.rehydrate(self._buffer, self._mapper, json_safe=self._json_safe)
         self._buffer = ""
         return out
 
@@ -287,6 +294,7 @@ def post_anonymize_response(
     response: ChatCompletionResponse,
     mapper: PseudonymMapper,
     anonymizer: Anonymizer,
+    json_safe: bool = False,
 ) -> None:
     """Rehydrate each choice's message content in place.
 
@@ -296,6 +304,11 @@ def post_anonymize_response(
     are left alone. Non-content fields (role, finish_reason, usage,
     routing metadata) are untouched.
 
+    ``json_safe=True`` when the caller requested structured output
+    (``response_format``) — the ``content`` is then a serialized JSON
+    document and each original must be escaped before substitution. See
+    :meth:`Anonymizer.rehydrate`.
+
     Per Decision D: the gateway rehydrates response *content* only.
     Citation rehydration happens downstream in the api/'s citation
     extraction, which operates on the already-rehydrated content.
@@ -304,7 +317,9 @@ def post_anonymize_response(
     for choice in response.choices:
         if choice.message.content is None:
             continue
-        choice.message.content = anonymizer.rehydrate(choice.message.content, mapper)
+        choice.message.content = anonymizer.rehydrate(
+            choice.message.content, mapper, json_safe=json_safe
+        )
 
 
 def _pseudonymize_strings(
