@@ -9,6 +9,8 @@ regex de once dígitos.
 
 import pytest
 
+from app.anonymization.recognizers.ar_bank import ArBankRecognizer, validar_cbu
+from app.anonymization.recognizers.ar_dni import ArDniRecognizer
 from app.anonymization.recognizers.ar_tax_id import ArTaxIdRecognizer, validar_cuit
 
 
@@ -62,18 +64,14 @@ class TestArTaxIdRecognizer:
     @pytest.mark.parametrize(
         "texto",
         [
-            "CUIT 30-71234567-2",           # verificador inválido
-            "expediente 30-71234567-1",     # forma válida pero sin etiqueta CUIT
+            "CUIT 30-71234567-2",  # verificador inválido
+            "expediente 30-71234567-1",  # forma válida pero sin etiqueta CUIT
             "el importe fue de 30712345671 pesos",  # once dígitos sin etiqueta
-            "factura 0001-00071234-1",      # otra cosa con guiones
+            "factura 0001-00071234-1",  # otra cosa con guiones
         ],
     )
     def test_no_detecta(self, recognizer, texto):
         assert recognizer.analyze(texto, entities=["AR_TAX_ID"]) == []
-
-
-from app.anonymization.recognizers.ar_bank import ArBankRecognizer, validar_cbu
-from app.anonymization.recognizers.ar_dni import ArDniRecognizer
 
 
 class TestValidarCbu:
@@ -110,7 +108,7 @@ class TestArBankRecognizer:
     @pytest.mark.parametrize(
         "texto",
         [
-            "CBU 0170099255000000000124",         # verificador inválido
+            "CBU 0170099255000000000124",  # verificador inválido
             "expediente 0170099255000000000123",  # sin etiqueta
         ],
     )

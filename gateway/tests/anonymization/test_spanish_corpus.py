@@ -19,8 +19,8 @@ CONTRATO_COMPARECENCIA = (
     "Entre GONZÁLEZ HERMANOS S.A., CUIT 30-71234567-1, con domicilio en "
     "Av. Corrientes 1234, Ciudad Autónoma de Buenos Aires, representada en "
     "este acto por Mariana Beatriz Quiroga, DNI 27.345.678, en adelante "
-    "\"LA LOCADORA\", y TECNOLOGÍA DEL SUR S.R.L., CUIT 33-69876543-2, "
-    "representada por Ignacio Ferreyra Alcorta, en adelante \"LA LOCATARIA\", "
+    '"LA LOCADORA", y TECNOLOGÍA DEL SUR S.R.L., CUIT 33-69876543-2, '
+    'representada por Ignacio Ferreyra Alcorta, en adelante "LA LOCATARIA", '
     "se celebra el presente contrato."
 )
 
