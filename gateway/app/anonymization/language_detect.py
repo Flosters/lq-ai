@@ -100,6 +100,53 @@ _FUNCIONALES: dict[str, frozenset[str]] = {
             "notwithstanding",
             "foregoing",
             "whereas",
+            # Funcionales de inglés general. La lista jurídica sola no
+            # reconoce un mensaje de chat, y ahí el empate 0-0 mandaba el
+            # texto al modelo español, que sobre inglés devuelve spans
+            # distintos en cada mensaje.
+            #
+            # Ojo al ampliar: NO agregar palabras que también sean español.
+            # "he", "has", "ha", "son", "fue", "era", "van" son formas
+            # verbales españolas y sumarían para el idioma equivocado.
+            "what",
+            "did",
+            "does",
+            "is",
+            "are",
+            "was",
+            "were",
+            "they",
+            "them",
+            "their",
+            "these",
+            "those",
+            "from",
+            "into",
+            "about",
+            "when",
+            "where",
+            "while",
+            "after",
+            "before",
+            "its",
+            "being",
+            "than",
+            "then",
+            "only",
+            "also",
+            "each",
+            "both",
+            "other",
+            "more",
+            "most",
+            "must",
+            "should",
+            "could",
+            "would",
+            "will",
+            "can",
+            "said",
+            "say",
         }
     ),
 }

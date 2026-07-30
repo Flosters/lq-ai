@@ -28,6 +28,11 @@ RUN pip install --no-cache-dir .
 # spaCy but they live in the same Analyzer.
 RUN python -m spacy download en_core_web_lg
 
+# El corpus de LegVolution es español. Se baja el modelo ``md`` (~40MB) y no
+# el ``lg`` (~570MB): es el que usa la config multilingüe de referencia de
+# Presidio y subir de tamaño sin medir recall antes es gastar imagen a ciegas.
+RUN python -m spacy download es_core_news_md
+
 COPY gateway/app/ ./app/
 
 # D0.5 — entrypoint script seeds /etc/lq-ai/gateway.yaml from the

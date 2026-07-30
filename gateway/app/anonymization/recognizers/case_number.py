@@ -120,7 +120,7 @@ class CaseNumberRecognizer(PatternRecognizer):
       non-docket identifiers (e.g. an arbitrary "No. 24-1234" tag).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, supported_language: str = "en") -> None:
         patterns = [
             Pattern(
                 name="canonical_reporter_cite",
@@ -142,4 +142,5 @@ class CaseNumberRecognizer(PatternRecognizer):
             supported_entity="CASE_NUMBER",
             name="CaseNumberRecognizer",
             patterns=patterns,
+            supported_language=supported_language,
         )

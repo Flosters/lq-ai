@@ -426,6 +426,17 @@ class AnonymizationConfig(BaseModel):
 
     enabled: bool = False
     apply_at_tiers: list[int] = Field(default_factory=list)
+    languages: list[str] = Field(default_factory=lambda: ["en"])
+    """Idiomas que el motor carga y entre los que ``detect_language`` elige
+    para cada texto. Cada idioma agrega un modelo de spaCy a la imagen; el
+    texto se analiza contra el idioma elegido, no contra todos — analizar
+    contra todos y unir los hallazgos se probó y se descartó (ver
+    ``engine.py``: el modelo inglés produce falsos positivos destructivos
+    sobre prosa española y ``_resolve_overlaps`` deja ganar al span más
+    largo, así que la basura sobrevive). El default queda en ``["en"]`` para
+    no cambiarle el comportamiento a un deployment existente que actualice
+    el gateway sin tocar su ``gateway.yaml``.
+    """
 
     @field_validator("apply_at_tiers")
     @classmethod
@@ -436,6 +447,24 @@ class AnonymizationConfig(BaseModel):
                     f"apply_at_tiers entry {tier} is out of [1, 5] range; "
                     "tiers run 1 (strongest) to 5 (weakest) per PRD §1.5.2."
                 )
+        return value
+
+    @field_validator("languages")
+    @classmethod
+    def _validate_languages(cls, value: list[str]) -> list[str]:
+        from app.anonymization.languages import SPACY_MODELS
+
+        for language in value:
+            if language not in SPACY_MODELS:
+                raise ValueError(
+                    f"anonymization.languages entry {language!r} has no spaCy "
+                    f"model mapping; known languages: {sorted(SPACY_MODELS)}."
+                )
+        if not value:
+            raise ValueError(
+                "anonymization.languages cannot be empty; set "
+                "anonymization.enabled: false to turn the layer off instead."
+            )
         return value
 
 
