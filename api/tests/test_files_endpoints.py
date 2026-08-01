@@ -733,3 +733,111 @@ async def test_get_metadata_includes_document_id_when_document_exists(
     assert metadata.status_code == 200
     body = metadata.json()
     assert body["document_id"] == str(document.id)
+
+
+# ---------------------------------------------------------------------------
+# Content dedupe on upload (same sha256 → reuse the processed file)
+# ---------------------------------------------------------------------------
+
+
+async def _upload_pdf(
+    client: AsyncClient, token: str, *, filename: str = "contract.pdf"
+) -> dict[str, Any]:
+    files, _ = _multipart_body(
+        filename=filename, content_type="application/pdf", payload=PDF_PAYLOAD
+    )
+    response = await client.post(
+        "/api/v1/files", files=files, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+async def _set_ingestion_status(db_session: AsyncSession, file_id: str, status_value: str) -> None:
+    await db_session.execute(
+        text("UPDATE files SET ingestion_status = :s WHERE id = :id"),
+        {"s": status_value, "id": file_id},
+    )
+    await db_session.flush()
+
+
+@pytest.mark.integration
+async def test_upload_duplicate_content_reuses_ready_file(
+    client: AsyncClient,
+    db_user: User,
+    db_session: AsyncSession,
+    fake_s3: FakeS3Client,
+) -> None:
+    """Re-uploading identical bytes returns the already-processed file.
+
+    No second files row, no second MinIO object, no re-ingest — the
+    response carries the original id with its ready status.
+    """
+
+    token = _bearer_for(db_user)
+    first = await _upload_pdf(client, token)
+    await _set_ingestion_status(db_session, first["id"], "ready")
+
+    second = await _upload_pdf(client, token, filename="contract (1).pdf")
+
+    assert second["id"] == first["id"]
+    assert second["ingestion_status"] == "ready"
+    count = (
+        await db_session.execute(
+            text("SELECT count(*) FROM files WHERE hash_sha256 = :h"),
+            {"h": first["hash_sha256"]},
+        )
+    ).scalar_one()
+    assert count == 1
+    # The duplicate's streamed bytes were cleaned up: only the original
+    # object remains in storage (ADR 0004: storage_path == file id).
+    assert list(fake_s3.objects.keys()) == [first["id"]]
+
+
+@pytest.mark.integration
+async def test_upload_duplicate_of_unprocessed_file_creates_new_row(
+    client: AsyncClient,
+    db_user: User,
+    db_session: AsyncSession,
+) -> None:
+    """A prior upload still pending (or failed) is not reused — the new
+    upload proceeds normally so ingestion gets a fresh chance."""
+
+    token = _bearer_for(db_user)
+    first = await _upload_pdf(client, token)  # stays 'pending'
+
+    second = await _upload_pdf(client, token, filename="retry.pdf")
+
+    assert second["id"] != first["id"]
+
+
+@pytest.mark.integration
+async def test_upload_duplicate_in_other_project_is_not_reused(
+    client: AsyncClient,
+    db_user: User,
+    db_session: AsyncSession,
+) -> None:
+    """Dedupe is scoped per project: identical content uploaded into a
+    different project keeps its own row (privilege boundaries)."""
+
+    from app.models.project import Project
+
+    token = _bearer_for(db_user)
+    first = await _upload_pdf(client, token)
+    await _set_ingestion_status(db_session, first["id"], "ready")
+
+    project = Project(id=uuid.uuid4(), owner_id=db_user.id, name="Matter X", slug="matter-x")
+    db_session.add(project)
+    await db_session.flush()
+
+    files, _ = _multipart_body(
+        filename="contract.pdf", content_type="application/pdf", payload=PDF_PAYLOAD
+    )
+    response = await client.post(
+        "/api/v1/files",
+        files=files,
+        data={"project_id": str(project.id)},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["id"] != first["id"]
