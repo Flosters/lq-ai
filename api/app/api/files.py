@@ -283,6 +283,45 @@ async def upload_file(
         max_size_bytes=max_size_bytes,
     )
 
+    # Content dedupe: the hash is only known after streaming, so the
+    # duplicate's bytes are already in MinIO — reuse requires deleting
+    # them. Scope is owner + project (privilege boundaries follow the
+    # project). Only 'ready' priors are reused: a pending twin may still
+    # fail, and a failed one must be retryable with a fresh row.
+    dedupe_stmt = (
+        select(FileModel)
+        .where(
+            FileModel.owner_id == user.id,
+            FileModel.project_id == resolved_project_id,
+            FileModel.hash_sha256 == upload_result.sha256_hex,
+            FileModel.deleted_at.is_(None),
+            FileModel.ingestion_status == "ready",
+        )
+        .limit(1)
+    )
+    existing = (await db.execute(dedupe_stmt)).scalars().first()
+    if existing is not None:
+        try:
+            await delete_object(storage_path=upload_result.storage_path)
+        except Exception:
+            log.warning(
+                "Failed to clean up MinIO object after dedupe reuse",
+                extra={
+                    "event": "file_upload_dedupe_cleanup_failed",
+                    "storage_path": upload_result.storage_path,
+                },
+            )
+        log.info(
+            "file upload deduplicated",
+            extra={
+                "event": "file_upload_deduplicated",
+                "user_id": str(user.id),
+                "file_id": str(existing.id),
+                "sha256": upload_result.sha256_hex,
+            },
+        )
+        return FileMetadata.model_validate(existing)
+
     row = FileModel(
         id=file_id,
         owner_id=user.id,
