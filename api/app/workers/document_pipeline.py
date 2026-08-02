@@ -142,7 +142,7 @@ async def ingest_file_job(ctx: dict[str, Any], file_id_str: str) -> dict[str, An
     }
 
 
-def _should_enqueue_enrich(*, status: str, parser: str, enrich_enabled: bool) -> bool:
+def _should_enqueue_enrich(*, status: str, parser: str | None, enrich_enabled: bool) -> bool:
     """Whether ingest should chain a Docling enrichment job.
 
     True only when enrichment is enabled AND the file reached ``ready``
