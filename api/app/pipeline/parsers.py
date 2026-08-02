@@ -637,7 +637,7 @@ def parse_pdf(pdf_bytes: bytes, *, run_docling: bool = True) -> ParsedDocument:
 
     if run_docling:
         try:
-            structured_content, docling_version = _run_docling(pdf_bytes)
+            structured_content, docling_version, _ = _run_docling(pdf_bytes)
             docling_succeeded = True
         except Exception as exc:
             # Docling failures are recoverable — we degrade to
@@ -787,13 +787,22 @@ def _safe_pymupdf_version() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _run_docling(pdf_bytes: bytes) -> tuple[dict[str, object], str]:
-    """Run Docling against the PDF; return its structured representation.
+def _run_docling(pdf_bytes: bytes, *, do_ocr: bool = False) -> tuple[dict[str, object], str, str]:
+    """Run Docling against the PDF; return (structured, version, text).
 
     Docling's API surface (as of v1.x) accepts an in-memory document
     via its converter. We use the ``DocumentConverter`` entry point
     and store the produced document's serialised ``model_dump()`` so
     M2 readers can deserialise it back into Docling objects.
+
+    ``do_ocr=False`` (the default) matters: Docling 1.x's own default
+    is OCR-on with four EasyOCR languages, which costs minutes per PDF
+    on CPU even for born-digital documents. The enrichment job opts in
+    only for image-only PDFs, restricted to es+en.
+
+    ``text`` is Docling's plain-text export, populated only on the OCR
+    path (it's the OCR'd character stream the caller re-chunks); empty
+    string otherwise.
 
     Raises:
         Any exception Docling raises. Caller catches and falls back to
@@ -802,6 +811,7 @@ def _run_docling(pdf_bytes: bytes) -> tuple[dict[str, object], str]:
 
     try:
         from docling.datamodel.base_models import DocumentStream
+        from docling.datamodel.pipeline_options import EasyOcrOptions, PipelineOptions
         from docling.document_converter import DocumentConverter
     except ImportError as exc:
         raise ParserError(
@@ -810,7 +820,10 @@ def _run_docling(pdf_bytes: bytes) -> tuple[dict[str, object], str]:
 
     import io
 
-    converter = DocumentConverter()
+    pipeline_options = PipelineOptions(do_ocr=do_ocr)
+    if do_ocr:
+        pipeline_options.ocr_options = EasyOcrOptions(lang=["es", "en"], use_gpu=False)
+    converter = DocumentConverter(pipeline_options=pipeline_options)
     stream = DocumentStream(name="upload.pdf", stream=io.BytesIO(pdf_bytes))
     result = converter.convert(stream)
 
@@ -824,7 +837,18 @@ def _run_docling(pdf_bytes: bytes) -> tuple[dict[str, object], str]:
     structured = doc.model_dump() if hasattr(doc, "model_dump") else {"raw": str(doc)}
 
     version = _safe_docling_version()
-    return structured, version
+    text = _docling_text(doc) if do_ocr else ""
+    return structured, version, text
+
+
+def _docling_text(doc: object) -> str:
+    """Best-effort plain text from a Docling document (for the OCR path)."""
+
+    for attr in ("export_to_markdown", "export_to_text"):
+        fn = getattr(doc, attr, None)
+        if callable(fn):
+            return str(fn())
+    return ""
 
 
 def _safe_docling_version() -> str:

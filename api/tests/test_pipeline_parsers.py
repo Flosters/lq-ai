@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.pipeline import parsers
 from app.pipeline.chunker import chunk_document
 from app.pipeline.parsers import (
     ParserError,
@@ -300,3 +301,97 @@ def test_parse_pdf_encrypted_raises_unsupported() -> None:
 
     with pytest.raises(ParserUnsupported):
         parse_pdf(encrypted, run_docling=False)
+
+
+# ---------------------------------------------------------------------------
+# _run_docling OCR flag + text export (Docling enrichment, 2026-08-02)
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_docling(monkeypatch, captured: dict) -> None:
+    """Inject fake docling modules; _run_docling imports lazily inside."""
+
+    import sys
+    import types
+
+    class FakeDoc:
+        def model_dump(self):
+            return {"fake": True}
+
+        def export_to_markdown(self):
+            return "# texto ocr"
+
+    class FakeResult:
+        document = FakeDoc()
+
+    class FakeConverter:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        def convert(self, stream):
+            return FakeResult()
+
+    class FakeStream:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class FakePipelineOptions:
+        def __init__(self, **kwargs):
+            self.do_ocr = kwargs.get("do_ocr", True)
+            self.ocr_options = None
+
+    class FakeEasyOcrOptions:
+        def __init__(self, **kwargs):
+            self.lang = kwargs.get("lang")
+            self.use_gpu = kwargs.get("use_gpu")
+
+    root = types.ModuleType("docling")
+    dm = types.ModuleType("docling.datamodel")
+    base = types.ModuleType("docling.datamodel.base_models")
+    base.DocumentStream = FakeStream
+    popts = types.ModuleType("docling.datamodel.pipeline_options")
+    popts.PipelineOptions = FakePipelineOptions
+    popts.EasyOcrOptions = FakeEasyOcrOptions
+    conv = types.ModuleType("docling.document_converter")
+    conv.DocumentConverter = FakeConverter
+    for name, mod in {
+        "docling": root,
+        "docling.datamodel": dm,
+        "docling.datamodel.base_models": base,
+        "docling.datamodel.pipeline_options": popts,
+        "docling.document_converter": conv,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+
+
+def test_run_docling_passes_ocr_flag_and_spanish_langs(monkeypatch) -> None:
+    captured: dict = {}
+    _install_fake_docling(monkeypatch, captured)
+
+    structured, version, text = parsers._run_docling(b"%PDF fake", do_ocr=True)
+
+    opts = captured["pipeline_options"]
+    assert opts.do_ocr is True
+    assert opts.ocr_options.lang == ["es", "en"]
+    assert opts.ocr_options.use_gpu is False
+    assert structured == {"fake": True}
+    assert text == "# texto ocr"
+
+
+def test_run_docling_defaults_to_no_ocr_and_no_text(monkeypatch) -> None:
+    captured: dict = {}
+    _install_fake_docling(monkeypatch, captured)
+
+    structured, version, text = parsers._run_docling(b"%PDF fake")
+
+    assert captured["pipeline_options"].do_ocr is False
+    assert text == ""
+
+
+def test_docling_text_prefers_markdown_export() -> None:
+    class Doc:
+        def export_to_markdown(self):
+            return "# hola"
+
+    assert parsers._docling_text(Doc()) == "# hola"
+    assert parsers._docling_text(object()) == ""
