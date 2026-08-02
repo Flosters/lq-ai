@@ -164,3 +164,31 @@ async def test_enrich_failure_leaves_document_untouched(
     doc = await _reload_document(db_session, file_row.id)
     assert doc.structured_content is None
     assert doc.parser_version == "pymupdf=test"
+
+
+@pytest.mark.integration
+async def test_enrich_ocrs_scanned_pdf(db_session: AsyncSession, db_user: User) -> None:
+    """Image-only PDF (no text layer) gets OCR'd, re-chunked, was_ocrd=True."""
+
+    file_row = await _make_file_with_document(
+        db_session, db_user, normalized_content=""
+    )
+
+    def fake_runner(pdf_bytes: bytes, *, do_ocr: bool):
+        assert do_ocr is True
+        return ({"pages": []}, "1.20.0-fake", "CONTRATO escaneado. " * 50)
+
+    result = await enrich_document_for_file(
+        db_session, file_row.id, docling_runner=fake_runner, pdf_bytes=b"%PDF fake"
+    )
+
+    assert result.status == "ocr_enriched"
+    doc = await _reload_document(db_session, file_row.id)
+    assert doc.was_ocrd is True
+    assert doc.normalized_content.startswith("CONTRATO")
+
+    chunks = await _load_chunks(db_session, doc.id)
+    assert len(chunks) > 0
+    # Citation Engine invariant: chunk text == slice of normalized_content.
+    c = chunks[0]
+    assert doc.normalized_content[c.char_offset_start : c.char_offset_end] == c.content
