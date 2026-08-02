@@ -117,6 +117,19 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Post-ready Docling enrichment (structured_content + scanned-PDF OCR).
+    # Independent from lq_ai_docling_enabled, which gates the legacy
+    # inline pass inside parse_pdf. Default False: upstream deployments
+    # opt in once the image bakes the Docling models (see api/Dockerfile).
+    lq_ai_docling_enrich_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, enqueue a background Docling job after a PDF "
+            "ingest reaches 'ready': fills documents.structured_content "
+            "and OCRs image-only PDFs (sets was_ocrd=True)."
+        ),
+    )
+
     # Chunker target / overlap. The defaults are tuned for ~500-token
     # chunks at the typical English-prose char/token ratio.
     lq_ai_chunk_target_chars: int = Field(

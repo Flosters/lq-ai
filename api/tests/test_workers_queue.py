@@ -112,3 +112,42 @@ async def test_enqueue_treatment_uses_dedup_job_id() -> None:
     assert args[0] == TREATMENT_DERIVATION_JOB_NAME
     assert args[1] == str(mid)
     assert kwargs.get("_job_id") == f"treatment:{mid}"
+
+
+@pytest.mark.unit
+def test_docling_enrich_job_name_constant() -> None:
+    from app.workers.queue import DOCLING_ENRICH_JOB_NAME
+
+    assert DOCLING_ENRICH_JOB_NAME == "docling_enrich_job"
+
+
+@pytest.mark.unit
+async def test_enqueue_docling_enrich_succeeds_returns_true() -> None:
+    import uuid as _uuid
+
+    from app.workers.queue import DOCLING_ENRICH_JOB_NAME, enqueue_docling_enrich_job
+
+    fake_pool = AsyncMock()
+    fake_pool.enqueue_job = AsyncMock(return_value="job-id")
+
+    with patch("app.workers.queue._get_pool", AsyncMock(return_value=fake_pool)):
+        ok = await enqueue_docling_enrich_job(_uuid.uuid4())
+
+    assert ok is True
+    args, _ = fake_pool.enqueue_job.call_args
+    assert args[0] == DOCLING_ENRICH_JOB_NAME
+
+
+@pytest.mark.unit
+async def test_enqueue_docling_enrich_failure_returns_false() -> None:
+    import uuid as _uuid
+
+    from app.workers.queue import enqueue_docling_enrich_job
+
+    fake_pool = AsyncMock()
+    fake_pool.enqueue_job = AsyncMock(side_effect=ConnectionError("redis down"))
+
+    with patch("app.workers.queue._get_pool", AsyncMock(return_value=fake_pool)):
+        ok = await enqueue_docling_enrich_job(_uuid.uuid4())
+
+    assert ok is False

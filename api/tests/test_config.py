@@ -113,3 +113,10 @@ def test_get_settings_is_cached() -> None:
     get_settings.cache_clear()
     c = get_settings()
     assert c is not a
+
+
+def test_docling_enrich_disabled_by_default() -> None:
+    """The post-ready Docling enrichment is operator-opt-in."""
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.lq_ai_docling_enrich_enabled is False

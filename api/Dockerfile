@@ -13,6 +13,11 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 RUN pip install --no-cache-dir .
 
+# Docling model artifacts baked at build time so the enrichment job
+# never fetches at runtime (runtime fetches crashed on the purged curl
+# and then hung without timeout — 2026-08-02 diagnosis).
+RUN python -c "from docling.document_converter import DocumentConverter; print(DocumentConverter.download_models_hf())"
+
 # Pandoc — the DOCX canonical-stream reader (ADR 0017), invoked at arm's
 # length as a subprocess by app/pipeline/parsers.py. Pinned to an exact
 # version: Pandoc output is deterministic per version only, and
@@ -25,7 +30,6 @@ RUN apt-get update \
  && arch="$(dpkg --print-architecture)" \
  && curl -fsSL "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-${arch}.tar.gz" \
     | tar -xz -C /usr/local --strip-components=1 "pandoc-${PANDOC_VERSION}/bin/pandoc" \
- && apt-get purge -y curl \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 

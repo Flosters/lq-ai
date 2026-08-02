@@ -56,6 +56,11 @@ TREATMENT_DERIVATION_JOB_NAME = "treatment_derivation_job"
 after each assistant turn finalizes; the ingest worker consumes it and derives
 the citation-graph treatment signal for all caselaw citations in the turn."""
 
+DOCLING_ENRICH_JOB_NAME = "docling_enrich_job"
+"""Post-ready Docling enrichment. Enqueued best-effort after a PDF ingest
+reaches ``ready``; fills ``documents.structured_content`` and OCRs image-only
+PDFs. Never blocks readiness — the fast path already made the file usable."""
+
 AUTONOMOUS_SESSION_JOB_NAME = "autonomous_session_job"
 """M4-A2 / M4-B3 — Autonomous Session execution pipeline. Enqueued by the
 B3 schedule dispatcher (and future watch/manual triggers) onto the shared
@@ -207,6 +212,35 @@ async def enqueue_embed_job(file_id: uuid.UUID) -> bool:
             "enqueue_embed_job: failed; embed-on-read will cover at query time",
             extra={
                 "event": "embed_enqueue_failed",
+                "file_id": str(file_id),
+                "error": str(exc),
+            },
+        )
+        return False
+
+
+async def enqueue_docling_enrich_job(file_id: uuid.UUID) -> bool:
+    """Enqueue a Docling enrichment job for ``file_id``; True on success.
+
+    Best-effort, mirroring the other enqueue helpers: a Redis failure
+    logs and returns False rather than raising. Enrichment is purely
+    additive, so a dropped enqueue only means structure/OCR is deferred
+    until the file is re-ingested — readiness is unaffected.
+    """
+
+    try:
+        pool = await _get_pool()
+        await pool.enqueue_job(DOCLING_ENRICH_JOB_NAME, str(file_id))
+        log.info(
+            "enqueue_docling_enrich_job: enqueued",
+            extra={"event": "docling_enrich_enqueue", "file_id": str(file_id)},
+        )
+        return True
+    except Exception as exc:
+        log.warning(
+            "enqueue_docling_enrich_job: failed; enrichment deferred",
+            extra={
+                "event": "docling_enrich_enqueue_failed",
                 "file_id": str(file_id),
                 "error": str(exc),
             },
