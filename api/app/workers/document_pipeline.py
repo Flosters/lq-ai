@@ -39,12 +39,17 @@ exceptions from shared helpers render consistently in logs.
 from __future__ import annotations
 
 import logging
+import asyncio
 import uuid
 from typing import Any, ClassVar
 
+from sqlalchemy import select
+
 from app.config import get_settings
 from app.db.session import dispose_engine, get_session_factory
-from app.pipeline.ingest import find_orphaned_files, ingest_file
+from app.models.file import File as FileModel
+from app.pipeline.enrich import enrich_document_for_file
+from app.pipeline.ingest import _read_all_bytes, find_orphaned_files, ingest_file
 from app.workers.treatment_worker import treatment_derivation_job
 from app.workers.user_deletion import hard_delete_due_users_job
 from app.workers.user_export import export_gc_job, export_user_data_job
@@ -105,6 +110,28 @@ async def ingest_file_job(ctx: dict[str, Any], file_id_str: str) -> dict[str, An
                     },
                 )
 
+    # Chain the post-ready Docling enrichment (structure + scanned-PDF
+    # OCR). Best-effort and off by default; only PDFs the fast path
+    # actually made ready enroll.
+    if _should_enqueue_enrich(
+        status=result.status,
+        parser=result.parser,
+        enrich_enabled=get_settings().lq_ai_docling_enrich_enabled,
+    ):
+        redis = ctx.get("redis")
+        if redis is not None:
+            try:
+                await redis.enqueue_job("docling_enrich_job", file_id_str)
+            except Exception as exc:
+                log.warning(
+                    "worker: failed to enqueue docling enrich job",
+                    extra={
+                        "event": "worker_docling_enrich_enqueue_failed",
+                        "file_id": file_id_str,
+                        "error": str(exc),
+                    },
+                )
+
     return {
         "file_id": str(result.file_id),
         "status": result.status,
@@ -113,6 +140,72 @@ async def ingest_file_job(ctx: dict[str, Any], file_id_str: str) -> dict[str, An
         "parser": result.parser,
         "error": result.error,
     }
+
+
+def _should_enqueue_enrich(*, status: str, parser: str, enrich_enabled: bool) -> bool:
+    """Whether ingest should chain a Docling enrichment job.
+
+    True only when enrichment is enabled AND the file reached ``ready``
+    via a PyMuPDF parse. DOCX (Pandoc) owns structured_content for its
+    redline layer and must never be enriched.
+    """
+
+    return enrich_enabled and status == "ready" and (parser or "").startswith("pymupdf")
+
+
+async def _load_file_bytes(session: Any, file_id: uuid.UUID) -> bytes:
+    """Load a file's raw bytes from storage by id (for the enrich job)."""
+
+    row = (
+        await session.execute(select(FileModel).where(FileModel.id == file_id))
+    ).scalar_one()
+    return await _read_all_bytes(row.storage_path)
+
+
+async def docling_enrich_job(ctx: dict[str, Any], file_id_str: str) -> dict[str, Any]:
+    """Post-ready Docling enrichment (best-effort, timeout-bounded).
+
+    Never blocks readiness: the file is already usable when this runs.
+    A pass that overruns ``lq_ai_docling_timeout_seconds`` returns a
+    failed result rather than raising, so arq does not retry a
+    multi-minute OCR indefinitely. When OCR produced new chunks, an
+    embed job is chained so they land in the vector index.
+    """
+
+    file_id = uuid.UUID(file_id_str)
+    settings = get_settings()
+    factory = get_session_factory()
+    async with factory() as session:
+        pdf_bytes = await _load_file_bytes(session, file_id)
+        try:
+            result = await asyncio.wait_for(
+                enrich_document_for_file(session, file_id, pdf_bytes=pdf_bytes),
+                timeout=settings.lq_ai_docling_timeout_seconds,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            log.warning(
+                "docling enrich timed out",
+                extra={"event": "docling_enrich_timeout", "file_id": file_id_str},
+            )
+            return {"file_id": file_id_str, "status": "failed", "error": "timeout"}
+        await session.commit()
+
+    if result.status == "ocr_enriched":
+        redis = ctx.get("redis")
+        if redis is not None:
+            try:
+                await redis.enqueue_job("embed_chunks_for_file_job", file_id_str)
+            except Exception as exc:
+                log.warning(
+                    "worker: failed to enqueue embed after OCR enrichment",
+                    extra={
+                        "event": "worker_ocr_embed_enqueue_failed",
+                        "file_id": file_id_str,
+                        "error": str(exc),
+                    },
+                )
+
+    return {"file_id": file_id_str, "status": result.status, "error": result.error}
 
 
 async def embed_chunks_for_file_job(
@@ -254,6 +347,7 @@ class WorkerSettings:
     functions: ClassVar[list[Any]] = [
         ingest_file_job,
         embed_chunks_for_file_job,
+        docling_enrich_job,
         export_user_data_job,
         treatment_derivation_job,
     ]
