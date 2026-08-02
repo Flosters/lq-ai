@@ -38,8 +38,8 @@ exceptions from shared helpers render consistently in logs.
 
 from __future__ import annotations
 
-import logging
 import asyncio
+import logging
 import uuid
 from typing import Any, ClassVar
 
@@ -182,7 +182,7 @@ async def docling_enrich_job(ctx: dict[str, Any], file_id_str: str) -> dict[str,
                 enrich_document_for_file(session, file_id, pdf_bytes=pdf_bytes),
                 timeout=settings.lq_ai_docling_timeout_seconds,
             )
-        except (TimeoutError, asyncio.TimeoutError):
+        except TimeoutError:
             log.warning(
                 "docling enrich timed out",
                 extra={"event": "docling_enrich_timeout", "file_id": file_id_str},

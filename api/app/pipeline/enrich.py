@@ -24,8 +24,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Protocol
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
