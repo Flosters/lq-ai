@@ -192,3 +192,56 @@ async def test_enrich_ocrs_scanned_pdf(db_session: AsyncSession, db_user: User) 
     # Citation Engine invariant: chunk text == slice of normalized_content.
     c = chunks[0]
     assert doc.normalized_content[c.char_offset_start : c.char_offset_end] == c.content
+
+
+@pytest.mark.integration
+async def test_docling_enrich_job_times_out_with_blocking_runner(
+    db_session: AsyncSession, db_user: User, monkeypatch
+) -> None:
+    """A *blocking* (synchronous) Docling pass that overruns the budget
+    must still let the job return "timeout" — proving the runner is run
+    off the event loop so ``asyncio.wait_for`` can actually fire. A
+    direct in-loop sync call would block past the budget and defeat it.
+    """
+
+    import time
+
+    from app.workers import document_pipeline as dp
+
+    file_row = await _make_file_with_document(db_session, db_user)
+
+    def blocking_runner(pdf_bytes: bytes, *, do_ocr: bool):
+        time.sleep(3)  # simulates CPU-bound Docling; never yields
+        return ({"pages": []}, "1.20.0-fake", "")
+
+    monkeypatch.setattr("app.pipeline.enrich._default_runner", blocking_runner)
+    monkeypatch.setattr(
+        dp, "_load_file_bytes", lambda session, fid: _async_bytes()
+    )
+    monkeypatch.setattr(dp, "get_session_factory", lambda: _session_cm_factory(db_session))
+
+    fake_settings = type("S", (), {"lq_ai_docling_timeout_seconds": 0.1})()
+    monkeypatch.setattr(dp, "get_settings", lambda: fake_settings)
+
+    started = time.monotonic()
+    result = await dp.docling_enrich_job({"redis": None}, str(file_row.id))
+    elapsed = time.monotonic() - started
+
+    assert result["status"] == "failed"
+    assert result["error"] == "timeout"
+    assert elapsed < 2.5  # returned on the budget, not after the 3s block
+
+
+async def _async_bytes() -> bytes:
+    return b"%PDF fake"
+
+
+def _session_cm_factory(session: AsyncSession):
+    class _CM:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *exc):
+            return False
+
+    return lambda: _CM()

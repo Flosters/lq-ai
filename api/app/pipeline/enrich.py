@@ -21,6 +21,7 @@ Contract:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
@@ -95,8 +96,16 @@ async def enrich_document_for_file(
     # it first, before any mutation, so a failure leaves the persisted
     # fast-path document exactly as it was (no rollback needed). The
     # caller owns the commit.
+    #
+    # Run it OFF the event loop: the runner is a CPU-bound, fully
+    # synchronous call (minutes on CPU). Calling it inline would block
+    # the loop and defeat the caller's ``asyncio.wait_for`` timeout —
+    # the orphaned thread finishes in the background, same tradeoff as
+    # the ingest parse (DE-351).
     try:
-        structured, version, text = runner(pdf_bytes, do_ocr=needs_ocr)
+        structured, version, text = await asyncio.to_thread(
+            runner, pdf_bytes, do_ocr=needs_ocr
+        )
     except Exception as exc:
         log.warning(
             "docling enrichment failed",
