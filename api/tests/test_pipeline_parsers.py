@@ -322,18 +322,32 @@ def _install_fake_docling(monkeypatch, captured: dict) -> None:
             return "# texto ocr"
 
     class FakeResult:
-        document = FakeDoc()
+        # Docling 1.20 exposes the converted document on ``.output``.
+        output = FakeDoc()
+
+    class FakeStream:
+        # Docling 1.20 requires ``filename`` (not ``name``) and ``stream``.
+        def __init__(self, *, filename, stream):
+            self.filename = filename
+            self.stream = stream
+
+    class FakeConversionInput:
+        def __init__(self, streams):
+            self.streams = list(streams)
+
+        @classmethod
+        def from_streams(cls, streams, limits=None):
+            return cls(streams)
 
     class FakeConverter:
         def __init__(self, *args, **kwargs):
             captured.update(kwargs)
 
-        def convert(self, stream):
-            return FakeResult()
-
-    class FakeStream:
-        def __init__(self, *args, **kwargs):
-            pass
+        def convert(self, conv_input):
+            # 1.20's convert takes a DocumentConversionInput and returns
+            # an iterable of results.
+            assert isinstance(conv_input, FakeConversionInput)
+            return [FakeResult()]
 
     class FakePipelineOptions:
         def __init__(self, **kwargs):
@@ -349,6 +363,8 @@ def _install_fake_docling(monkeypatch, captured: dict) -> None:
     dm = types.ModuleType("docling.datamodel")
     base = types.ModuleType("docling.datamodel.base_models")
     base.DocumentStream = FakeStream
+    docmod = types.ModuleType("docling.datamodel.document")
+    docmod.DocumentConversionInput = FakeConversionInput
     popts = types.ModuleType("docling.datamodel.pipeline_options")
     popts.PipelineOptions = FakePipelineOptions
     popts.EasyOcrOptions = FakeEasyOcrOptions
@@ -358,6 +374,7 @@ def _install_fake_docling(monkeypatch, captured: dict) -> None:
         "docling": root,
         "docling.datamodel": dm,
         "docling.datamodel.base_models": base,
+        "docling.datamodel.document": docmod,
         "docling.datamodel.pipeline_options": popts,
         "docling.document_converter": conv,
     }.items():

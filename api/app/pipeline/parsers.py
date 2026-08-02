@@ -811,6 +811,7 @@ def _run_docling(pdf_bytes: bytes, *, do_ocr: bool = False) -> tuple[dict[str, o
 
     try:
         from docling.datamodel.base_models import DocumentStream
+        from docling.datamodel.document import DocumentConversionInput
         from docling.datamodel.pipeline_options import EasyOcrOptions, PipelineOptions
         from docling.document_converter import DocumentConverter
     except ImportError as exc:
@@ -824,11 +825,19 @@ def _run_docling(pdf_bytes: bytes, *, do_ocr: bool = False) -> tuple[dict[str, o
     if do_ocr:
         pipeline_options.ocr_options = EasyOcrOptions(lang=["es", "en"], use_gpu=False)
     converter = DocumentConverter(pipeline_options=pipeline_options)
-    stream = DocumentStream(name="upload.pdf", stream=io.BytesIO(pdf_bytes))
-    result = converter.convert(stream)
 
-    # Newer Docling exposes the result on .document; older on .output.
-    doc = getattr(result, "document", None) or getattr(result, "output", None)
+    # Docling 1.20: convert() takes a DocumentConversionInput built from
+    # DocumentStreams (which require ``filename``) and returns an
+    # iterable of results; the converted document is on ``.output``.
+    conv_input = DocumentConversionInput.from_streams(
+        [DocumentStream(filename="upload.pdf", stream=io.BytesIO(pdf_bytes))]
+    )
+    results = list(converter.convert(conv_input))
+    if not results:
+        raise ParserError("Docling returned no results on conversion")
+    result = results[0]
+
+    doc = getattr(result, "output", None) or getattr(result, "document", None)
     if doc is None:
         raise ParserError("Docling returned no document on conversion result")
 
