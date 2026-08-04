@@ -115,6 +115,28 @@ _CITATION_RE = re.compile(
     flags=re.DOTALL,
 )
 
+# DE-CIT-1: any double-quoted span — straight (``"..."``), curly
+# (``"..."``), or Spanish guillemets (``«...»``) — with NO ``(Source: [N])``
+# tag. The marker-less fallback scans these and locates them by content
+# against the retrieved chunks. Guillemets matter: the corpus and the
+# model's answers are Spanish, where ``«...»`` is the native quote shape.
+_ANY_QUOTE_RE = re.compile(
+    r'"(?P<sq>[^"]+?)"'
+    r"|"
+    r"“(?P<cq>[^”]+?)”"
+    r"|"
+    r"«(?P<gq>[^»]+?)»",
+    flags=re.DOTALL,
+)
+
+# Minimum length (characters) for a marker-less quote to be considered.
+# Tagged quotes are asserted by the model, so we trust short ones; an
+# untagged quote is *inferred*, and a single quoted word (e.g. "razonable")
+# that happens to appear verbatim in a chunk would pass Stage 1 verification
+# and render as a spurious source. Requiring a phrase-length span keeps the
+# fallback to genuine clause quotes without polluting the citation list.
+_MARKERLESS_MIN_QUOTE_CHARS = 24
+
 # Extraction-level fuzzy threshold. Below this, the quote is considered
 # unrelated to the chunk content (model fabricated or mis-cited).
 # Above, the candidate proceeds to the verifier cascade — Stage 1
@@ -147,6 +169,97 @@ def locate_in_chunk(quote: str, chunk_content: str) -> tuple[int, int] | None:
     return alignment.dest_start, alignment.dest_end
 
 
+def _candidate_at(
+    chunk: _RetrievedChunk, start: int, end: int, quote: str
+) -> CitationCandidate:
+    """Build a candidate at the given (already document-absolute) offsets."""
+
+    return CitationCandidate(
+        source_file_id=chunk.file_id,
+        source_document_id=chunk.document_id,
+        source_offset_start=start,
+        source_offset_end=end,
+        source_page=chunk.page_start,
+        source_text=quote,
+    )
+
+
+def _resolve_markerless_quote(
+    quote: str,
+    retrieved_chunks: Sequence[_RetrievedChunk],
+    document_contents: Mapping[uuid.UUID, str] | None,
+) -> CitationCandidate | None:
+    """Locate an untagged quote across the retrieved chunks / their documents.
+
+    There is no ``[N]`` index to trust, so we search everywhere, preferring
+    exact matches over fuzzy ones globally: an exact hit in a parent
+    document (a quote that spans two adjacent chunks) must win over a
+    partial fuzzy hit inside one chunk. Order: exact-in-chunk →
+    exact-in-document → fuzzy-in-chunk → fuzzy-in-document. The strict
+    verifier re-checks whatever we return.
+    """
+
+    # One representative chunk per parent document — carries the file_id
+    # and page we stamp on document-scan candidates.
+    doc_reps: dict[uuid.UUID, _RetrievedChunk] = {}
+    for chunk in retrieved_chunks:
+        doc_reps.setdefault(chunk.document_id, chunk)
+
+    # 1. Exact substring inside a chunk (chunk-local offsets).
+    for chunk in retrieved_chunks:
+        idx = chunk.content.find(quote)
+        if idx >= 0:
+            start = chunk.char_offset_start + idx
+            return _candidate_at(chunk, start, start + len(quote), quote)
+
+    # 2. Exact substring inside a parent document (document-absolute offsets).
+    if document_contents is not None:
+        for doc_id, chunk in doc_reps.items():
+            doc_content = document_contents.get(doc_id)
+            if not doc_content:
+                continue
+            idx = doc_content.find(quote)
+            if idx >= 0:
+                _log_markerless_document_scan(doc_id, quote)
+                return _candidate_at(chunk, idx, idx + len(quote), quote)
+
+    # 3. Fuzzy alignment inside a chunk.
+    for chunk in retrieved_chunks:
+        located = locate_in_chunk(quote, chunk.content)
+        if located is not None:
+            in_start, in_end = located
+            return _candidate_at(
+                chunk,
+                chunk.char_offset_start + in_start,
+                chunk.char_offset_start + in_end,
+                quote,
+            )
+
+    # 4. Fuzzy alignment inside a parent document.
+    if document_contents is not None:
+        for doc_id, chunk in doc_reps.items():
+            doc_content = document_contents.get(doc_id)
+            if not doc_content:
+                continue
+            located = locate_in_chunk(quote, doc_content)
+            if located is not None:
+                _log_markerless_document_scan(doc_id, quote)
+                return _candidate_at(chunk, located[0], located[1], quote)
+
+    return None
+
+
+def _log_markerless_document_scan(document_id: uuid.UUID, quote: str) -> None:
+    logger.warning(
+        "marker-less citation located via full-document scan",
+        extra={
+            "event": "citation_markerless_document_scan",
+            "document_id": str(document_id),
+            "quote_prefix": quote[:40],
+        },
+    )
+
+
 def extract_citations(
     response_text: str,
     retrieved_chunks: Sequence[_RetrievedChunk],
@@ -177,8 +290,12 @@ def extract_citations(
     """
 
     candidates: list[CitationCandidate] = []
+    # Character spans of the tagged matches, so the marker-less pass below
+    # doesn't re-process a quote the tagged pass already claimed.
+    tagged_spans: list[tuple[int, int]] = []
 
     for match in _CITATION_RE.finditer(response_text):
+        tagged_spans.append(match.span())
         # Exactly one of the two named branches is populated per match.
         quote = match.group("sq") or match.group("cq")
         index_str = match.group("sq_index") or match.group("cq_index")
@@ -245,5 +362,19 @@ def extract_citations(
                 source_text=quote,
             )
         )
+
+    # DE-CIT-1: marker-less fallback. Scan every quoted span that the
+    # tagged pass did not claim; when it's a phrase-length quote we can
+    # locate in the retrieved context, emit a candidate for the verifier.
+    for match in _ANY_QUOTE_RE.finditer(response_text):
+        q_start = match.start()
+        if any(ts <= q_start < te for ts, te in tagged_spans):
+            continue  # already handled as a tagged citation
+        quote = match.group("sq") or match.group("cq") or match.group("gq")
+        if quote is None or len(quote.strip()) < _MARKERLESS_MIN_QUOTE_CHARS:
+            continue
+        candidate = _resolve_markerless_quote(quote, retrieved_chunks, document_contents)
+        if candidate is not None:
+            candidates.append(candidate)
 
     return candidates

@@ -1113,13 +1113,20 @@ def _format_retrieval_context_block(
 
     The header carries the M2 Citation Engine's citation contract: when
     the model grounds a claim in a retrieved chunk, it must quote the
-    source verbatim in straight double quotes followed by
-    ``(Source: [N])`` where N matches the bracketed index of the chunk
-    below. The extractor (``app.citation.extraction``) parses that
-    shape; the Stage 1 verifier checks the quote byte-for-byte against
-    ``documents.normalized_content``. Paraphrases or smart-quoted
-    citations fail Stage 1 and fall through to later stages when those
-    ship (M2-B1 tolerant-match, M2-C1 LLM judge).
+    source verbatim in double quotes followed by ``(Source: [N])`` where
+    N matches the bracketed index of the chunk below. The extractor
+    (``app.citation.extraction``) parses that shape; the Stage 1 verifier
+    checks the quote byte-for-byte against ``documents.normalized_content``.
+    Paraphrases or smart-quoted citations fail Stage 1 and fall through to
+    later stages (M2-B1 tolerant-match, M2-C1 LLM judge).
+
+    DE-CIT-1: the contract is written in Spanish, placed up front, made
+    imperative, and given a worked example. In production, Sonnet-4.5
+    answering in Spanish routinely quoted a clause but skipped the
+    ``(Source: [N])`` tag, so nothing extracted and the message rendered
+    "0 fuentes". The reinforced contract lifts compliance; the extractor's
+    marker-less fallback (``app.citation.extraction``) is the safety net
+    for the turns where the model still forgets the tag.
 
     Chunk text is included verbatim. We do not truncate at the
     character level (the LLM's tokenizer will window if the request is
@@ -1127,17 +1134,21 @@ def _format_retrieval_context_block(
     """
 
     lines: list[str] = [
-        "Retrieved context from your matter's knowledge bases. "
-        "Cite these sources when they bear on the user's question; "
-        "ignore them if they are not relevant.",
+        "Contexto recuperado de las bases de conocimiento del asunto.",
         "",
-        "Citation format: when you ground a claim in a retrieved chunk, "
-        'quote the source passage VERBATIM in straight double quotes "..." '
-        "immediately followed by `(Source: [N])` where N is the bracketed "
-        "index of the chunk below. Quotes must be byte-for-byte exact - "
-        "do not paraphrase, summarize, or change punctuation, casing, or "
-        "whitespace inside quoted material. Use this format every time you "
-        "rely on a chunk; otherwise the citation will render as unverified.",
+        "REGLA DE CITADO (obligatoria): cada vez que fundes una afirmación "
+        "en uno de los fragmentos de abajo, citá el pasaje de la fuente de "
+        "forma TEXTUAL, entre comillas dobles, seguido inmediatamente de "
+        "`(Source: [N])`, donde N es el índice entre corchetes del fragmento. "
+        "La cita tiene que ser idéntica al original: no parafrasees, no "
+        "resumas ni cambies puntuación, mayúsculas ni espacios dentro de las "
+        "comillas. Citá así TODAS las veces que uses un fragmento; sin ese "
+        "formato la cita queda sin verificar y no se le muestra al usuario.",
+        "",
+        'Ejemplo: El contrato establece que "El plazo será de cinco años." '
+        "(Source: [1]).",
+        "",
+        "Usá el contexto cuando sea relevante para la pregunta; ignoralo si no lo es.",
         "",
     ]
     for idx, chunk in enumerate(chunks, start=1):

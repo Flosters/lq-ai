@@ -248,6 +248,157 @@ def test_extract_smart_quote_alignment_pairs() -> None:
     assert candidates[0].source_text == "The agreement shall terminate."
 
 
+# ---------------------------------------------------------------------------
+# DE-CIT-1: marker-less fallback. The model frequently quotes a source
+# passage verbatim but omits the ``(Source: [N])`` tag entirely (observed
+# in production: Spanish answers that quote a clause conversationally).
+# When a quoted span is not tagged, locate it across ALL retrieved chunks
+# (no index to trust) and, failing that, across the parent documents. The
+# strict verifier still gates every candidate downstream.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_markerless_verbatim_quote_locates_across_chunks() -> None:
+    """An untagged verbatim quote present in a retrieved chunk becomes a candidate."""
+
+    chunk = _chunk(
+        content="El plazo de confidencialidad será de cinco años.",
+        char_offset_start=300,
+    )
+    # No (Source: [N]) tag — the model quoted the clause conversationally.
+    response = 'El contrato dice: "El plazo de confidencialidad será de cinco años."'
+
+    candidates = extract_citations(response, [chunk])
+
+    assert len(candidates) == 1
+    cite = candidates[0]
+    assert cite.source_file_id == chunk.file_id
+    assert cite.source_document_id == chunk.document_id
+    assert cite.source_offset_start == 300 + chunk.content.find("El plazo")
+    assert cite.source_text == "El plazo de confidencialidad será de cinco años."
+
+
+@pytest.mark.unit
+def test_markerless_locates_spanish_guillemets_quote() -> None:
+    """Spanish «...» quotes without a tag are located too (corpus is es)."""
+
+    chunk = _chunk(content="La obligación permanece vigente tras la terminación.")
+    # The period sits outside the guillemets, so the quote excludes it; the
+    # phrase is still an exact substring of the chunk.
+    response = "El acuerdo establece que «La obligación permanece vigente tras la terminación»."
+
+    candidates = extract_citations(response, [chunk])
+
+    assert len(candidates) == 1
+    assert candidates[0].source_text == "La obligación permanece vigente tras la terminación"
+
+
+@pytest.mark.unit
+def test_markerless_short_quote_is_ignored() -> None:
+    """A short untagged quoted word must not become a spurious citation.
+
+    Untagged quotes are inferred, not asserted by the model, so a single
+    quoted word ("confidencial") that happens to appear byte-for-byte in a
+    chunk would otherwise pass Stage 1 verification and render as a source.
+    """
+
+    chunk = _chunk(content="Toda la información confidencial del proyecto.")
+    response = 'Se refiere a la información "confidencial" del proyecto.'
+
+    assert extract_citations(response, [chunk]) == []
+
+
+@pytest.mark.unit
+def test_markerless_unfindable_quote_is_dropped() -> None:
+    """A long untagged quote absent from every chunk is dropped."""
+
+    chunk = _chunk(content="El contrato regula el plazo de entrega de la mercadería.")
+    response = 'El modelo inventó "una cláusula que no está en ninguna parte del corpus."'
+
+    assert extract_citations(response, [chunk]) == []
+
+
+@pytest.mark.unit
+def test_tagged_quote_is_not_double_counted_as_markerless() -> None:
+    """A quote WITH a (Source: [N]) tag yields exactly one candidate."""
+
+    chunk = _chunk(content="The contract term shall be five years.")
+    response = 'The agreement says "The contract term shall be five years." (Source: [1]).'
+
+    candidates = extract_citations(response, [chunk])
+
+    assert len(candidates) == 1
+    assert candidates[0].source_text == "The contract term shall be five years."
+
+
+@pytest.mark.unit
+def test_markerless_and_tagged_quotes_coexist() -> None:
+    """One tagged and one untagged quote in the same answer → two candidates."""
+
+    chunk1 = _chunk(content="First fact statement of some length.", char_offset_start=0)
+    chunk2 = _chunk(
+        content="Second fact assertion long enough to cite.",
+        char_offset_start=500,
+        page_start=3,
+    )
+    response = (
+        'He said "First fact statement of some length." (Source: [1]) and '
+        'also quoted "Second fact assertion long enough to cite." without a tag.'
+    )
+
+    candidates = extract_citations(response, [chunk1, chunk2])
+
+    assert len(candidates) == 2
+    by_doc = {c.source_document_id: c for c in candidates}
+    assert by_doc[chunk1.document_id].source_text == "First fact statement of some length."
+    assert by_doc[chunk2.document_id].source_text == "Second fact assertion long enough to cite."
+    assert by_doc[chunk2.document_id].source_page == 3
+
+
+@pytest.mark.unit
+def test_markerless_full_document_fallback() -> None:
+    """An untagged quote spanning a chunk boundary resolves via document scan."""
+
+    doc_id = uuid.uuid4()
+    file_id = uuid.uuid4()
+    # The quote lives in the document but in neither chunk individually.
+    chunk_a = _StubChunk(
+        document_id=doc_id,
+        file_id=file_id,
+        content="...la primera parte de la cláusula relevante",
+        page_start=1,
+        char_offset_start=0,
+        char_offset_end=44,
+    )
+    chunk_b = _StubChunk(
+        document_id=doc_id,
+        file_id=file_id,
+        content="y la segunda parte que la completa...",
+        page_start=2,
+        char_offset_start=44,
+        char_offset_end=81,
+    )
+    doc_content = (
+        "la primera parte de la cláusula relevante y la segunda parte que la completa"
+    )
+    response = (
+        'El contrato dice: "la primera parte de la cláusula relevante y la '
+        'segunda parte que la completa".'
+    )
+
+    candidates = extract_citations(
+        response, [chunk_a, chunk_b], {doc_id: doc_content}
+    )
+
+    assert len(candidates) == 1
+    cite = candidates[0]
+    assert cite.source_document_id == doc_id
+    assert doc_content[cite.source_offset_start : cite.source_offset_end] == (
+        "la primera parte de la cláusula relevante y la segunda parte que la completa"
+    )
+
+
 @pytest.mark.unit
 def test_locate_in_chunk_public_exact_and_miss() -> None:
     """Test the public locate_in_chunk function directly."""

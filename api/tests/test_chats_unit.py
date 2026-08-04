@@ -268,3 +268,62 @@ def test_message_to_response_is_enhanced_true_when_skill_applied() -> None:
     row = FakeRow([])
     row.applied_skills = None  # type: ignore[assignment]
     assert message_to_response(row).is_enhanced is False
+
+
+class TestRetrievalContextBlockCitationContract:
+    """DE-CIT-1: the citation contract must actually get the model to cite.
+
+    Root cause of "0 fuentes": the contract was a soft, English, buried
+    instruction and Sonnet-4.5 answering in Spanish often skipped the
+    ``(Source: [N])`` tag. These tests pin the reinforced contract:
+    Spanish, up front, imperative, with a worked example.
+    """
+
+    @staticmethod
+    def _chunk(content: str = "El plazo es de cinco años.", file_name: str = "nda.pdf"):
+        import uuid as _uuid
+
+        from app.knowledge.retrieval import HybridSearchResult
+
+        return HybridSearchResult(
+            chunk_id=_uuid.uuid4(),
+            document_id=_uuid.uuid4(),
+            file_id=_uuid.uuid4(),
+            file_name=file_name,
+            content=content,
+            page_start=1,
+            page_end=1,
+            char_offset_start=0,
+            char_offset_end=len(content),
+            vector_score=0.9,
+            fts_score=0.9,
+            hybrid_score=0.9,
+        )
+
+    def test_contract_states_the_source_format(self) -> None:
+        from app.api.chats import _format_retrieval_context_block
+
+        block = _format_retrieval_context_block([self._chunk()])
+        assert "(Source: [N])" in block
+
+    def test_contract_is_in_spanish(self) -> None:
+        from app.api.chats import _format_retrieval_context_block
+
+        block = _format_retrieval_context_block([self._chunk()]).lower()
+        # Spanish, imperative citation verb + "textual" (verbatim).
+        assert "cit" in block  # citá / cita / citar
+        assert "textual" in block
+
+    def test_contract_includes_a_worked_example(self) -> None:
+        from app.api.chats import _format_retrieval_context_block
+
+        block = _format_retrieval_context_block([self._chunk()])
+        # A concrete example showing the exact shape with a real index.
+        assert "(Source: [1])" in block
+
+    def test_contract_precedes_the_chunk_list(self) -> None:
+        from app.api.chats import _format_retrieval_context_block
+
+        chunk = self._chunk(content="CONTENIDO-UNICO-DEL-CHUNK")
+        block = _format_retrieval_context_block([chunk])
+        assert block.index("(Source: [N])") < block.index("CONTENIDO-UNICO-DEL-CHUNK")
