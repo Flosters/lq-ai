@@ -143,7 +143,8 @@ const mockExecutionCompleted = {
 			matches_standard: 2,
 			matches_fallback: 2,
 			deviates: 2,
-			missing: 2
+			missing: 2,
+			error: 0
 		}
 	}
 };

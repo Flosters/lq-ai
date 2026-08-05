@@ -24,6 +24,7 @@ describe('outcomeClass', () => {
 		expect(outcomeClass('matches_fallback')).toBe('lq-outcome--matches-fallback');
 		expect(outcomeClass('deviates')).toBe('lq-outcome--deviates');
 		expect(outcomeClass('missing')).toBe('lq-outcome--missing');
+		expect(outcomeClass('error')).toBe('lq-outcome--error');
 	});
 });
 
@@ -35,6 +36,7 @@ describe('severityLabel + outcomeLabel', () => {
 		expect(outcomeLabel('matches_fallback')).toBe('Matches fallback');
 		expect(outcomeLabel('deviates')).toBe('Deviates');
 		expect(outcomeLabel('missing')).toBe('Missing');
+		expect(outcomeLabel('error')).toBe('Classification failed — needs review');
 	});
 });
 

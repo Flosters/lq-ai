@@ -34,6 +34,7 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -59,15 +60,33 @@ logger = logging.getLogger(__name__)
 # even on cheap models.
 RETRIEVAL_TOP_K = 4
 
-# Maximum tokens for the classify call. The structured output is
-# short — verdict + confidence + matched_text + justification — so
-# 600 tokens is generous without letting a chatty model run away.
-CLASSIFY_MAX_TOKENS = 600
+# Maximum tokens for the classify call. Raised from 600 after the
+# Elementa NDA run truncated mid ``matched_text`` — the model quoted a
+# long clause verbatim, blew the budget, and emitted an unterminated
+# JSON string that parsed to nothing and was misreported as ``missing``.
+#
+# The ``smart`` alias resolves to a Claude Sonnet reasoning model, and
+# ``max_tokens`` caps *thinking + visible output combined* (see the
+# gateway's own note in ``gateway/app/config.py``). A reasoning-heavy
+# call can therefore spend the whole budget thinking and emit only
+# ``{"verdict": "`` before hitting ``finish_reason='length'`` — which is
+# why 1500 still truncated the occasional position. 4000 leaves ample
+# room for the model to think *and* finish the (now length-capped) JSON.
+# Truncation should now be rare; when it still happens the executor
+# surfaces it as an ``error`` verdict, never a false ``missing`` (see
+# :func:`classify_node`). A cleaner long-term fix is to disable extended
+# thinking for this deterministic extraction call at the gateway.
+CLASSIFY_MAX_TOKENS = 4000
 
-# Maximum tokens for the redline call. Slightly larger because the
-# redline output includes old_text + new_text + justification, all
-# free-form English.
-REDLINE_MAX_TOKENS = 800
+# Maximum tokens for the redline call. Raised to 4000 for the same
+# reason as CLASSIFY_MAX_TOKENS: the ``smart`` judge is a reasoning
+# model whose thinking tokens share this budget, and the redline output
+# (verbatim old_text + new_text + justification) can itself be long. At
+# 800 a redline for a long deviating clause truncated mid ``old_text``
+# — benign (the position stays ``deviates`` with no auto-drafted edit,
+# since a failed redline just yields empty fields) but it needlessly
+# dropped suggestions the reviewer could have used.
+REDLINE_MAX_TOKENS = 4000
 
 # Classifier output JSON schema (documented in the prompt; parsed by
 # :func:`_parse_classify_response`). The verdict + confidence pair
@@ -122,11 +141,10 @@ def make_retrieve_node(
                 retrievals.append({"position_id": pos["id"], "chunks": fallback})
                 continue
 
-            query = " ".join(keywords)
             chunks = await _fts_over_document(
                 db,
                 document_id=target_doc_id,
-                query=query,
+                keywords=keywords,
                 limit=RETRIEVAL_TOP_K,
             )
             if not chunks:
@@ -147,28 +165,52 @@ async def _fts_over_document(
     db: AsyncSession,
     *,
     document_id: uuid.UUID,
-    query: str,
+    keywords: list[str],
     limit: int,
 ) -> list[dict[str, Any]]:
     """Run FTS over ``document_chunks`` scoped to one document.
 
-    Uses ``websearch_to_tsquery`` rather than ``plainto_tsquery`` so
-    multi-keyword queries with OR-like semantics rank chunks that hit
-    any keyword (the user's intent when they list multiple
-    ``detection_keywords``).
+    A chunk matches if it hits **any** of the position's
+    ``detection_keywords`` — the intent when an author lists several. We
+    build that as an OR of one ``plainto_tsquery`` per keyword combined
+    with ``||``: ``plainto_tsquery`` ANDs the words *inside* a phrase
+    (so ``"governing law"`` stays a phrase), while ``||`` ORs *across*
+    keywords.
+
+    ``websearch_to_tsquery('english', " ".join(keywords))`` was used here
+    before and is deliberately avoided: it treats spaces as AND, so a
+    space-joined keyword string requires a single chunk to contain
+    *every* keyword. Multi-keyword positions then matched nothing, fell
+    back to the document's first chunks, and were misreported as
+    ``missing`` — the false-negative this replaces.
     """
+    terms = [k.strip() for k in keywords if k and k.strip()]
+    if not terms:
+        return []
+
+    # Build ``plainto_tsquery(:k0) || plainto_tsquery(:k1) || ...``. Only
+    # the fixed ``plainto_tsquery('english', :kN)`` fragments are
+    # interpolated into the SQL; every keyword travels as a bound
+    # parameter, so this is not an injection vector.
+    params: dict[str, Any] = {"doc_id": str(document_id), "limit": limit}
+    or_parts: list[str] = []
+    for i, term in enumerate(terms):
+        params[f"k{i}"] = term
+        or_parts.append(f"plainto_tsquery('english', :k{i})")
+    tsquery = " || ".join(or_parts)
+
     result = await db.execute(
         text(
             "SELECT dc.id::text, dc.chunk_index, dc.content, "
             "dc.char_offset_start, dc.char_offset_end, dc.page_start, "
-            "ts_rank_cd(dc.content_tsv, websearch_to_tsquery('english', :q)) AS rank "
+            f"ts_rank_cd(dc.content_tsv, {tsquery}) AS rank "
             "FROM document_chunks dc "
             "WHERE dc.document_id = :doc_id "
-            "AND dc.content_tsv @@ websearch_to_tsquery('english', :q) "
+            f"AND dc.content_tsv @@ ({tsquery}) "
             "ORDER BY rank DESC, dc.chunk_index ASC "
             "LIMIT :limit"
         ),
-        {"q": query, "doc_id": str(document_id), "limit": limit},
+        params,
     )
     return [
         {
@@ -229,7 +271,7 @@ Your job: determine how the contract excerpt compares to the standard
   {"verdict": "matches_standard" | "matches_fallback" | "deviates" | "missing",
    "confidence": "high" | "medium" | "low",
    "matched_fallback_rank": <int|null>,
-   "matched_text": "<verbatim quote of the contract clause your verdict references, or empty if missing>",
+   "matched_text": "<short verbatim quote — the operative sentence or clause span your verdict references; at most ~60 words. Do NOT paste an entire long clause verbatim. Empty if missing.>",
    "cited_chunk_indices": [<int>, ...],
    "justification": "<one or two sentences explaining your verdict>"}
 
@@ -294,13 +336,50 @@ def make_classify_node(
                 )
                 chunks = retrievals_by_position.get(pos["id"], [])
                 messages = _build_classify_messages(pos, chunks)
-                verdict_data = await _dispatch_structured_call(
+                call = await _dispatch_structured_call(
                     gateway=gateway,
                     model=judge_model,
                     messages=messages,
                     max_tokens=CLASSIFY_MAX_TOKENS,
                 )
 
+                if call.data is None:
+                    # The classify call produced no usable answer (transport
+                    # failure, or a truncated / malformed JSON body). Do NOT
+                    # coerce this to a confident ``missing`` — that is
+                    # indistinguishable from a genuinely-absent clause and is
+                    # the exact false negative that shipped the Elementa run.
+                    # Surface a distinct ``error`` verdict for human review.
+                    record_attributes(
+                        pos_span,
+                        **{
+                            "playbook.position.verdict": "error",
+                            "playbook.classify.failure": call.failure or "unknown",
+                            "playbook.classify.finish_reason": call.finish_reason or "",
+                        },
+                    )
+                    logger.warning(
+                        "playbook classify produced no usable answer; "
+                        "emitting 'error' verdict (failure=%s, finish_reason=%s)",
+                        call.failure,
+                        call.finish_reason,
+                        extra={
+                            "event": "playbook_classify_error_verdict",
+                            "position_id": pos["id"],
+                            "failure": call.failure,
+                            "finish_reason": call.finish_reason,
+                        },
+                    )
+                    results.append(
+                        _error_verdict_result(
+                            pos,
+                            failure=call.failure,
+                            finish_reason=call.finish_reason,
+                        )
+                    )
+                    continue
+
+                verdict_data = call.data
                 verdict = _coerce_verdict(verdict_data.get("verdict"))
                 confidence_str = _coerce_confidence(verdict_data.get("confidence"))
                 cited_indices = _coerce_chunk_indices(
@@ -334,6 +413,47 @@ def make_classify_node(
         return {"per_position_results": results}
 
     return classify_node
+
+
+def _error_verdict_result(
+    position: Any,
+    *,
+    failure: str | None,
+    finish_reason: str | None,
+) -> dict[str, Any]:
+    """Build a per-position result for a classify call that produced no answer.
+
+    Emitted when :func:`_dispatch_structured_call` returns ``data is
+    None``. The verdict is ``error`` — never ``missing`` — so the outcome
+    reads as "the classifier failed here," not "the clause is absent."
+    Confidence is pinned ``low`` and the justification says in words that
+    this is not an absence determination, so nothing downstream (UI, Word
+    add-in, summary counts) can present it as a confident finding.
+    """
+    detail = failure or "unknown"
+    if finish_reason:
+        detail = f"{detail}, finish_reason={finish_reason}"
+    reason = (
+        "the model response was truncated before it finished"
+        if finish_reason == "length"
+        else "the model did not return a usable classification"
+    )
+    return {
+        "position_id": position["id"],
+        "issue": position["issue"],
+        "severity_if_missing": position["severity_if_missing"],
+        "verdict": "error",
+        "confidence": _CONFIDENCE_NUMERIC["low"],
+        "matched_fallback_rank": None,
+        "cited_chunk_ids": [],
+        "matched_text": "",
+        "redline": None,
+        "justification": (
+            f"Classification could not be completed: {reason} ({detail}). "
+            "This is a classifier error, NOT a determination that the clause "
+            "is absent — this position needs human review."
+        ),
+    }
 
 
 def _build_classify_messages(
@@ -438,12 +558,17 @@ def make_redline_node(
                 continue
 
             messages = _build_redline_messages(pos, result)
-            redline_data = await _dispatch_structured_call(
+            call = await _dispatch_structured_call(
                 gateway=gateway,
                 model=judge_model,
                 messages=messages,
                 max_tokens=REDLINE_MAX_TOKENS,
             )
+            # Best-effort: a failed redline call just yields empty fields
+            # (no suggested edit). Unlike classify, there's no false-negative
+            # risk here — the deviation is already flagged; the redline is an
+            # optional convenience the operator can still author by hand.
+            redline_data = call.data or {}
             redline = {
                 "old_text": str(redline_data.get("old_text") or ""),
                 "new_text": str(redline_data.get("new_text") or ""),
@@ -551,6 +676,7 @@ def _summarize(per_position: list[Any]) -> dict[str, int]:
         "matches_fallback": 0,
         "deviates": 0,
         "missing": 0,
+        "error": 0,
     }
     for result in per_position:
         verdict = result.get("verdict")
@@ -564,14 +690,38 @@ def _summarize(per_position: list[Any]) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class StructuredCallResult:
+    """Outcome of a structured-JSON LLM call.
+
+    ``data`` is the parsed object on success and ``None`` on *any*
+    failure — transport error, empty/malformed response envelope, or
+    JSON that could not be parsed (typically a truncation). ``failure``
+    carries a short machine code for the ``None`` case; ``finish_reason``
+    is the provider's stop reason when the response body reached us
+    (``"length"`` is the truncation signal).
+
+    The ``None``-means-failure contract is the crux of the Elementa fix:
+    callers can now tell a call that *failed* apart from one that
+    *succeeded and said the clause is absent*. Best-effort callers (the
+    redliner) keep their old behaviour via ``data or {}``; the classifier
+    keys off ``data is None`` to emit a distinct ``error`` verdict rather
+    than a confident-looking ``missing``.
+    """
+
+    data: dict[str, Any] | None
+    failure: str | None = None
+    finish_reason: str | None = None
+
+
 async def _dispatch_structured_call(
     *,
     gateway: GatewayClient,
     model: str,
     messages: list[ChatCompletionMessage],
     max_tokens: int,
-) -> dict[str, Any]:
-    """Run a structured-JSON LLM call and return the parsed dict.
+) -> StructuredCallResult:
+    """Run a structured-JSON LLM call and return a :class:`StructuredCallResult`.
 
     Mirrors the M2-C1 paraphrase-judge dispatch pattern. ``temperature``
     is omitted: Anthropic Opus 4.x reasoning models rejected the
@@ -582,9 +732,9 @@ async def _dispatch_structured_call(
     verify it; ``lq_ai_purpose='playbook_executor'`` so the routing log
     can be filtered for cost calibration.
 
-    Returns an empty dict on transport / parse failure; the caller
-    treats that as a low-confidence ``missing`` (the classifier's
-    "I have nothing to say" failure mode).
+    On failure ``data`` is ``None`` and ``failure`` names the stage that
+    broke; the caller decides how to surface it (the classifier as an
+    ``error`` verdict, the redliner as an empty redline).
     """
     request = ChatCompletionRequest(
         model=model,
@@ -604,23 +754,44 @@ async def _dispatch_structured_call(
                 "error_type": type(exc).__name__,
             },
         )
-        return {}
+        return StructuredCallResult(data=None, failure="gateway_error")
 
     try:
         choices = response.choices
         if not choices:
-            return {}
-        content = choices[0].message.content
+            return StructuredCallResult(data=None, failure="no_choices")
+        choice = choices[0]
+        content = choice.message.content
     except AttributeError:
-        return {}
+        return StructuredCallResult(data=None, failure="malformed_response")
+
+    finish_reason = getattr(choice, "finish_reason", None)
     if not content:
-        return {}
+        return StructuredCallResult(
+            data=None, failure="empty_content", finish_reason=finish_reason
+        )
 
-    return _parse_json_object(content)
+    parsed = _parse_json_object(content, finish_reason=finish_reason)
+    if parsed is None:
+        return StructuredCallResult(
+            data=None, failure="malformed_json", finish_reason=finish_reason
+        )
+    return StructuredCallResult(data=parsed, finish_reason=finish_reason)
 
 
-def _parse_json_object(content: str) -> dict[str, Any]:
-    """Lenient JSON parse — trim a leading code fence if present, then ``json.loads``."""
+def _parse_json_object(
+    content: str, *, finish_reason: str | None = None
+) -> dict[str, Any] | None:
+    """Lenient JSON parse — trim a leading code fence if present, then ``json.loads``.
+
+    Returns ``None`` (not ``{}``) on any failure so the caller can tell a
+    parse FAILURE apart from a model that genuinely returned an object:
+    a truncated response and a real ``missing`` verdict must never
+    collapse into the same confident-looking outcome. On a decode error
+    the log carries ``finish_reason`` and a prefix of the raw content so
+    operators can confirm truncation (``finish_reason='length'``) as the
+    cause rather than guessing.
+    """
     stripped = content.strip()
     if stripped.startswith("```"):
         # Drop a leading ``` or ```json fence and the trailing ``` line.
@@ -632,13 +803,22 @@ def _parse_json_object(content: str) -> dict[str, Any]:
         parsed = json.loads(stripped)
     except json.JSONDecodeError as exc:
         logger.warning(
-            "playbook structured-call returned malformed JSON: %s",
+            "playbook structured-call returned malformed JSON "
+            "(finish_reason=%s, likely_truncated=%s): %s | raw_prefix=%r",
+            finish_reason,
+            finish_reason == "length",
             exc,
-            extra={"event": "playbook_structured_call_malformed_json"},
+            content[:200],
+            extra={
+                "event": "playbook_structured_call_malformed_json",
+                "finish_reason": finish_reason,
+                "likely_truncated": finish_reason == "length",
+                "raw_content_prefix": content[:500],
+            },
         )
-        return {}
+        return None
     if not isinstance(parsed, dict):
-        return {}
+        return None
     return parsed
 
 

@@ -38,6 +38,7 @@ from app.playbooks.nodes import (
     _parse_json_object,
     _shape_results_payload,
     _summarize,
+    make_retrieve_node,
 )
 from app.security import hash_password
 
@@ -83,10 +84,27 @@ def test_parse_json_object_strips_code_fence() -> None:
 
 
 @pytest.mark.unit
-def test_parse_json_object_returns_empty_on_garbage() -> None:
-    assert _parse_json_object("not json at all") == {}
-    assert _parse_json_object("[1, 2, 3]") == {}  # non-object
-    assert _parse_json_object("") == {}
+def test_parse_json_object_returns_none_on_garbage() -> None:
+    # None (not {}) signals an unusable response so the caller can tell a
+    # parse FAILURE apart from a genuine "clause absent" verdict — a `{}`
+    # would collapse both into the same confident-looking `missing`.
+    assert _parse_json_object("not json at all") is None
+    assert _parse_json_object("[1, 2, 3]") is None  # non-object
+    assert _parse_json_object("") is None
+
+
+@pytest.mark.unit
+def test_parse_json_object_returns_none_on_truncated_string() -> None:
+    # The Elementa failure mode: a long verbatim `matched_text` quote runs
+    # past max_tokens and the JSON is cut off mid-string. json.loads raises
+    # "Unterminated string"; the parser must surface that as None, never {}.
+    truncated = (
+        '{"verdict": "matches_standard",\n'
+        ' "confidence": "high",\n'
+        ' "matched_text": "The Receiving Party shall hold all Confidential '
+        "Information disclosed by the Disclosing Party in strict confiden"
+    )
+    assert _parse_json_object(truncated) is None
 
 
 @pytest.mark.unit
@@ -106,6 +124,7 @@ def test_summarize_counts_each_verdict_bucket() -> None:
         "matches_fallback": 1,
         "deviates": 1,
         "missing": 1,
+        "error": 0,
     }
 
 
@@ -453,17 +472,18 @@ async def test_executor_marks_missing_when_keyword_not_in_document(
 
 
 @pytest.mark.integration
-async def test_executor_persists_error_on_gateway_failure(
+async def test_executor_persists_error_verdict_on_gateway_failure(
     db_session: AsyncSession,
 ) -> None:
-    """A gateway exception inside the classifier surfaces as a low-confidence missing.
+    """A gateway exception inside the classifier surfaces as an ``error`` verdict.
 
-    The structured-call dispatcher swallows transport errors and
-    returns ``{}`` — :func:`_coerce_verdict` then maps the empty dict
-    to ``missing`` at ``low`` confidence. The execution still
-    completes successfully (status='completed') because the failure
-    is per-position, not per-execution; partial robustness is a
-    feature, not a bug.
+    The structured-call dispatcher swallows transport errors, but the
+    executor must NOT pretend the clause is absent: a call that never
+    produced a usable answer is indistinguishable, evidence-wise, from
+    truncation, and mapping it to ``missing`` is the same dangerous
+    false negative. The position surfaces as ``verdict='error'`` at low
+    confidence. The execution still completes (status='completed')
+    because the failure is per-position, not per-execution.
     """
     owner = await _make_user(db_session)
     _file, doc, _chunks = await _make_doc_with_chunks(
@@ -497,9 +517,195 @@ async def test_executor_persists_error_on_gateway_failure(
     )
 
     await db_session.refresh(execution)
-    # The gateway swallowed the error per-call; the executor still
-    # writes a completed row with a 'missing' verdict for the position.
+    # The gateway swallowed the error per-call; the executor writes a
+    # completed row but flags the position as 'error' — NOT 'missing' —
+    # so a reviewer never mistakes an unreachable classifier for a
+    # genuinely-absent clause.
     assert execution.status == "completed"
     positions = execution.results["positions"]
-    assert positions[0]["verdict"] == "missing"
+    assert positions[0]["verdict"] == "error"
+    assert positions[0]["verdict"] != "missing"
     assert positions[0]["confidence"] == 0.5  # low → 0.5
+    assert positions[0]["justification"]  # non-empty: explains the failure
+
+
+# ---------------------------------------------------------------------------
+# Retrieve node — multi-keyword FTS regression (the Elementa false-missing bug)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_retrieve_matches_any_keyword_not_all(
+    db_session: AsyncSession,
+) -> None:
+    """A multi-keyword position must retrieve a chunk that hits ANY keyword.
+
+    Regression for the Elementa NDA run where every position came back
+    ``missing``: the retrieve node joined ``detection_keywords`` with
+    spaces and fed them to ``websearch_to_tsquery``, which ANDs the
+    terms. No single chunk held every keyword, so FTS returned nothing
+    and the node fell back to the document's first chunks — the
+    classifier then never saw the real clause and reported it missing.
+
+    Here the governing-law clause lives only in the LAST chunk (index 5,
+    outside the ``RETRIEVAL_TOP_K`` first-chunk fallback window) and only
+    ONE of the position's keywords ("arbitration") appears in the whole
+    document. Correct OR semantics must still surface that chunk.
+    """
+    owner = await _make_user(db_session)
+    # Six chunks; only chunk 5 mentions arbitration. The first-chunks
+    # fallback returns 0..3, so a chunk at index 5 proves real retrieval.
+    chunks_text = [
+        "Preamble. This Agreement is entered into between the parties.",
+        "Definitions. Affiliate, Confidential Information, and Representatives.",
+        "The Receiving Party shall hold Confidential Information in confidence.",
+        "Permitted disclosures to Representatives on a need-to-know basis.",
+        "Miscellaneous. Entire agreement, severability, and counterparts.",
+        "Any dispute shall be finally settled by arbitration seated in Geneva.",
+    ]
+    _file, doc, _chunks = await _make_doc_with_chunks(
+        db_session,
+        owner=owner,
+        normalized_text=" ".join(chunks_text),
+        chunks_text=chunks_text,
+    )
+
+    position = {
+        "id": str(uuid.uuid4()),
+        "issue": "Governing Law and Venue",
+        "detection_keywords": [
+            "governing law",
+            "jurisdiction",
+            "venue",
+            "arbitration",
+        ],
+    }
+    state: dict[str, Any] = {
+        "target_document_id": str(doc.id),
+        "positions": [position],
+    }
+
+    retrieve = make_retrieve_node(db_session)
+    result = await retrieve(state)  # type: ignore[arg-type]
+
+    retrieved = {r["position_id"]: r["chunks"] for r in result["retrievals"]}
+    chunks = retrieved[position["id"]]
+    contents = " ".join(c["content"] for c in chunks)
+    # The clause that matches one keyword must be retrieved. Under the
+    # AND bug this fails: FTS returns nothing and the fallback hands back
+    # only chunks 0..3, none of which mention arbitration.
+    assert "arbitration" in contents.lower()
+
+
+# ---------------------------------------------------------------------------
+# Classify node — truncated JSON must NOT masquerade as "missing"
+# (the second Elementa false-negative: a confident-looking absent clause)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _TruncatedChoice:
+    """A choice whose content is a truncated JSON string + finish_reason='length'.
+
+    Models the provider cutting the response off at max_tokens mid-string —
+    exactly what produced the ``Unterminated string`` log line on the
+    Elementa run.
+    """
+
+    message: _StubMessage
+    finish_reason: str = "length"
+
+
+@dataclass
+class _TruncatedGateway:
+    """Returns one truncated, unparseable classify response, then empties."""
+
+    content: str
+    calls_received: list[Any] = field(default_factory=list)
+
+    async def chat_completion(self, request: Any) -> Any:
+        self.calls_received.append(request)
+        return _StubResponse(  # type: ignore[return-value]
+            choices=[_TruncatedChoice(message=_StubMessage(content=self.content))]
+        )
+
+
+@pytest.mark.integration
+async def test_executor_truncated_classify_is_error_not_missing(
+    db_session: AsyncSession,
+) -> None:
+    """A truncated classify response over a doc that DOES contain the clause
+    must surface as ``error``, never a confident ``missing``.
+
+    This is the core regression for the second Elementa bug: the standard
+    confidentiality clause is present in the document (retrieval succeeds),
+    but the model's classify JSON is cut off mid ``matched_text`` at
+    max_tokens. The old code caught the ``JSONDecodeError``, returned
+    ``{}``, and ``_coerce_verdict`` turned that into ``verdict='missing'``
+    at confidence 0.5 with an empty justification — indistinguishable from
+    a genuinely-absent clause, the worst failure mode in contract review.
+
+    The fix: a parse failure is a distinct ``error`` verdict, so a reviewer
+    never treats a truncated classifier answer as "the clause isn't there."
+    """
+    owner = await _make_user(db_session)
+    _file, doc, _chunks = await _make_doc_with_chunks(
+        db_session,
+        owner=owner,
+        normalized_text=(
+            "Section 1. The Receiving Party shall hold Confidential Information "
+            "in confidence and not disclose it to any third party."
+        ),
+        chunks_text=[
+            "Section 1. The Receiving Party shall hold Confidential Information",
+            "in confidence and not disclose it to any third party.",
+        ],
+    )
+    playbook = await _make_playbook_with_position(
+        db_session,
+        issue="Confidentiality",
+        detection_keywords=["confidence", "Confidential"],
+    )
+
+    execution = PlaybookExecution(
+        playbook_id=playbook.id,
+        target_document_id=doc.id,
+        user_id=owner.id,
+    )
+    db_session.add(execution)
+    await db_session.flush()
+
+    # Valid JSON prefix, then cut off mid-string in matched_text — the
+    # classic max_tokens truncation. json.loads raises "Unterminated string".
+    truncated_content = (
+        '{"verdict": "matches_standard",\n'
+        ' "confidence": "high",\n'
+        ' "matched_fallback_rank": null,\n'
+        ' "cited_chunk_indices": [0],\n'
+        ' "matched_text": "The Receiving Party shall hold Confidential '
+        "Information in confidence and not disclose it to any third party, and "
+        "shall protect such information using at least the same degree of care"
+    )
+    gateway = _TruncatedGateway(content=truncated_content)
+
+    await run_playbook_execution(
+        db_session,
+        execution_id=execution.id,
+        gateway=gateway,  # type: ignore[arg-type]
+    )
+
+    await db_session.refresh(execution)
+    assert execution.status == "completed"
+    positions = execution.results["positions"]
+    assert len(positions) == 1
+    # The whole point: a truncated answer is NOT a "clause absent" verdict.
+    assert positions[0]["verdict"] == "error"
+    assert positions[0]["verdict"] != "missing"
+    # Low signal, non-empty justification explaining it's a classifier error.
+    assert positions[0]["confidence"] == 0.5
+    assert positions[0]["justification"]
+    assert positions[0]["matched_text"] == ""
+    assert positions[0]["redline"] is None
+    # The error is counted in its own summary bucket, not folded into missing.
+    assert execution.results["summary"]["error"] == 1
+    assert execution.results["summary"]["missing"] == 0

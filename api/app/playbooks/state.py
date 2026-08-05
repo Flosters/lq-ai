@@ -23,11 +23,23 @@ PositionVerdict = Literal[
     "matches_fallback",
     "deviates",
     "missing",
+    "error",
 ]
-"""One of the four per-position classification verdicts the executor
-emits. ``matches_fallback`` is single-valued (the executor records
-which fallback tier matched in the result's ``matched_fallback_rank``
-field rather than encoding the rank in the verdict itself)."""
+"""One per-position classification outcome the executor emits.
+
+The first four are *model* verdicts (see ``_VALID_VERDICTS`` in
+:mod:`app.playbooks.nodes`); ``matches_fallback`` is single-valued (the
+executor records which fallback tier matched in the result's
+``matched_fallback_rank`` field rather than encoding the rank in the
+verdict itself).
+
+``error`` is executor-injected, never model-emitted: it marks a
+position whose classify call produced no usable answer (transport
+failure, or a truncated/malformed JSON response). It is deliberately
+distinct from ``missing`` so a reviewer never mistakes "the classifier
+failed" for "the clause is absent" — the latter is a determination, the
+former is the absence of one, and conflating them is a silent
+false negative in contract review."""
 
 
 class _PositionInput(TypedDict):

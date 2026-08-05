@@ -30,6 +30,8 @@ export function outcomeLabel(v: PlaybookPositionVerdict): string {
 			return 'Deviates';
 		case 'missing':
 			return 'Missing';
+		case 'error':
+			return 'Classification failed — needs review';
 	}
 }
 

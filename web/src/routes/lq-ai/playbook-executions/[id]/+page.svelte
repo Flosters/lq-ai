@@ -35,7 +35,8 @@
 		matches_standard: 0,
 		matches_fallback: 0,
 		deviates: 0,
-		missing: 0
+		missing: 0,
+		error: 0
 	};
 
 	async function loadOnce(): Promise<void> {
@@ -134,6 +135,15 @@
 					<div class="lq-pbx-summary__count">{summary.missing}</div>
 					<div class="lq-pbx-summary__label">Missing</div>
 				</div>
+				{#if summary.error > 0}
+					<div
+						class="lq-pbx-summary__item lq-pbx-summary__item--error"
+						data-testid="lq-pbx-summary-error"
+					>
+						<div class="lq-pbx-summary__count">{summary.error}</div>
+						<div class="lq-pbx-summary__label">Failed — review</div>
+					</div>
+				{/if}
 			</aside>
 
 			<div class="lq-pbx-filters" data-testid="lq-pbx-filters">
@@ -155,6 +165,7 @@
 						<option value="matches_fallback">Matches fallback</option>
 						<option value="deviates">Deviates</option>
 						<option value="missing">Missing</option>
+						<option value="error">Classification failed</option>
 					</select>
 				</label>
 				<div class="lq-pbx-filters__count">
@@ -311,7 +322,10 @@
 
 	.lq-pbx-summary {
 		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
+		/* auto-fit so the strip flows evenly whether there are 4 verdict
+		   cards or 5 (the optional "error" card) — a fixed 4-col grid
+		   left the 5th card stranded alone on a second row. */
+		grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
 		gap: 0.75rem;
 	}
 	.lq-pbx-summary__item {
@@ -492,5 +506,20 @@
 	.lq-outcome--missing {
 		background: var(--lq-error-soft, var(--lq-inset));
 		color: var(--lq-error);
+	}
+	/* Classifier failure — visually distinct from `missing` (a real
+	   determination) so a truncated/failed classification reads as
+	   "needs review", not "clause absent". */
+	.lq-outcome--error {
+		background: var(--lq-warn-soft, var(--lq-inset));
+		color: var(--lq-warn);
+		border: 1px dashed var(--lq-warn, var(--lq-border));
+	}
+	.lq-pbx-summary__item--error {
+		background: var(--lq-warn-soft, var(--lq-inset));
+		box-shadow: inset 0 0 0 1px var(--lq-warn-border, var(--lq-border));
+	}
+	.lq-pbx-summary__item--error .lq-pbx-summary__count {
+		color: var(--lq-warn);
 	}
 </style>

@@ -915,7 +915,12 @@ export type PlaybookPositionVerdict =
 	| 'matches_standard'
 	| 'matches_fallback'
 	| 'deviates'
-	| 'missing';
+	| 'missing'
+	// Executor-injected (never model-emitted): the classify call produced no
+	// usable answer (transport failure or a truncated/malformed response).
+	// Distinct from `missing` so a truncated classifier answer is never
+	// mistaken for a determination that the clause is absent.
+	| 'error';
 
 export interface FallbackTier {
 	rank: number;
@@ -972,6 +977,10 @@ export interface PlaybookExecutionSummary {
 	matches_fallback: number;
 	deviates: number;
 	missing: number;
+	// Count of positions the classifier failed on (see PlaybookPositionVerdict
+	// 'error'). Kept separate from `missing` so a failed classification is
+	// never folded into the absent-clause count.
+	error: number;
 }
 
 export interface PlaybookExecutionResults {

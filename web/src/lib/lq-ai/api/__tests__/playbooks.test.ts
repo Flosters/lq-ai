@@ -281,7 +281,8 @@ describe('playbooks API client', () => {
 						matches_standard: 0,
 						matches_fallback: 0,
 						deviates: 0,
-						missing: 0
+						missing: 0,
+						error: 0
 					}
 				},
 				error: null,
