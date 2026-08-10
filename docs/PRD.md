@@ -1715,10 +1715,10 @@ PyMuPDF (AGPL) is used server-side only and not redistributed as a library; the 
 
 ### 7.4 Governance
 
-- **Initial model: BDFL.** Kevin Keller is the initial maintainer.
+- **Model: committee-carried.** The committee steers the project between releases; `GOVERNANCE.md` at the repository root is the living record of the roles, the decision workflow, and the amendment process. Kevin Keller, the project's founder and initial maintainer, authored the guiding principles, initial architecture, and roadmap; those documents remain canonical unless amended through the process in `GOVERNANCE.md`.
 - LegalQuants stewards the project (owns the GitHub org, controls trademark, employs maintainer).
 - Documented commitment to community contribution: "LQ.AI welcomes contributions from any lawyer, legal-ops practitioner, or engineer who wants to advance open legal AI."
-- Path to broader governance documented but not implemented in v1: as the project matures, consider transition to a maintainer team and formal governance (see CNCF or Apache Software Foundation models).
+- The transition to a maintainer team and formal governance, deferred at v1, was taken up by the committee over the calls of 2026-06-28 through 2026-07-19 and is recorded in `GOVERNANCE.md` and ADR 0022.
 
 ### 7.5 Contribution Model
 
@@ -1754,10 +1754,10 @@ PyMuPDF (AGPL) is used server-side only and not redistributed as a library; the 
 
 ### 7.8 Release Cadence and Supply-Chain Transparency
 
-- Semantic versioning (semver).
+- Semantic versioning (semver). The versioning unit and pre-1.0 semantics are defined in [ADR 0025](adr/0025-release-versioning-and-pipeline-ordering.md): `api`, `gateway`, `web`, and `proxy` share one release version; the desktop launcher versions independently and records the image set it ships against. Pre-1.0 the project promises more than semver requires: **a patch release never requires operator action** — no new environment variable, config change, migration step or client change — and anything that does require it bumps the minor instead. A patch is safe to take unread; a minor means read the release notes.
 - Releases tagged on GitHub with full changelog.
-- Targeted cadence: minor release every 6–8 weeks, patch releases as needed.
-- Long-term-support (LTS) designation for one minor version per year, with security backports for 12 months.
+- Targeted cadence: minor release **every 8–12 weeks**, patch releases as needed. Cadence is **best-effort and capacity-dependent** while the project operates with its current maintainer and signing-identity concentration; revisit once desktop signing moves to an org-owned Apple Developer account and/or a second maintainer holds release authority (see ADR 0025, *Cadence*).
+- Long-term-support (LTS) designation for one minor version per year, with security backports for **6 months**, reflecting current capacity to staff backport work; extend once the bottlenecks above are resolved.
 
 **Supply-chain transparency commitments (M1, per §1.8 and Appendix E).**
 
@@ -5008,9 +5008,15 @@ The gateway `Router`'s `_tool_rate_limiter` (`gateway/app/router.py`) is a singl
 
 #### DE-385 — `desktop/package-lock.json` top-level version is stale (`0.5.2`), out of sync with `package.json`
 
-**Priority:** P3 · **Effort:** XS · **Status (2026-07-04): filed (v0.6.1 release).**
+**Priority:** P3 · **Effort:** XS · **Status (2026-08-10): SHIPPED — lockfile half; checklist half rides `docs/BUILD-AND-RELEASE.md`.** Fixed at the `desktop-v0.7.0` cut: `npm version 0.7.0 --no-git-tag-version` in `desktop/` moved `package.json` `0.6.2 → 0.7.0` and both of the lockfile's version fields (top-level and `packages[""]`) `0.5.2 → 0.7.0`. The diff is **version-only — three lines, no dependency-tree change**, as this entry requires. The second half of the fix, folding the bump into the release checklist so the two cannot drift again, lands as step 7 of the release workflow in `docs/BUILD-AND-RELEASE.md`. Note the drift was worse than cosmetic by the time it was caught: because electron-builder names the artifact from `package.json`, tagging `desktop-v0.7.0` without this bump would have published a `.dmg` called `LQ.AI-0.6.2-arm64.dmg`.
 
 `desktop/package.json` is bumped by hand each release (0.6.0 → 0.6.1 at v0.6.1), but `desktop/package-lock.json` still carries `"version": "0.5.2"` at its top level (and in `packages[""].version`) — it was never regenerated when `package.json` moved to 0.6.0 at the v0.6.0 cut, and the v0.6.1 bump left it untouched (hand-editing the lockfile version risks desyncing the resolved dependency tree, so it was deliberately not patched inline). npm keeps the lockfile version in sync only on `npm install`. The desktop app itself versions on its own `desktop-vX.Y.Z` tag track (independent of the lock's stale field), so this is cosmetic/hygiene, not a build correctness bug — but it makes the lockfile a misleading provenance artifact. Fix: run `npm install` in `desktop/` (no dependency changes intended — just let npm rewrite the version field), verify the diff is version-only, and commit; then fold a "regenerate the lockfile" step into the release checklist so `package.json` and the lock never drift again.
+
+#### DE-386 — Tool providers have no OAuth2 client-credentials auth (blocks the first machine-to-machine authority source)
+
+**Priority:** P2 · **Effort:** M · **Status (2026-08-10): filed (surfaced routing lq-ai#271 under ADR 0024; blocks that contribution).**
+
+Every shipped authority source authenticates with a static API key or nothing at all: `ToolProviderConfig` (`gateway/app/config.py`) accepts exactly `api_key_env`, `api_key_encrypted`, and `user_agent`, and CourtListener / GovInfo use the key paths while EDGAR / EUR-Lex use only a `user_agent`. There is no third auth mode, so a source whose API requires an OAuth2 **client-credentials** grant cannot be configured at all. lq-ai#271 (EUIPO Trademark Register) is the first such proposal and is blocked on this; the gap was found by dry-running ADR 0024's routing against the live docket, and is recorded in [the expansion direction paper](proposals/jurisdiction-and-practice-area-expansion.md) §Reconciliation. Five pieces are missing: (a) **config surface** — no `token_url` / `client_id` / `client_secret_env` / `scope` fields and no validator for the combination; (b) **token lifecycle** — nothing acquires, caches, or refreshes a bearer token for a tool provider, or re-mints and retries once on a `401`; (c) **a second egress target** — the authorization server is a different host from the API host, so it needs its own allowlist entry and its own `validate_egress_target` pass, since the gateway refuses un-allowlisted hosts by design (ADR 0014); (d) **client-secret handling at rest** — the Fernet path in `provider_keys.py` exists for API keys but is not wired for a secret consumed in a token exchange; and (e) **a decision to hang it on** — ADR 0021's D1–D7 cover the registry, retrieval intent, citability, cost model, honest unavailability, phasing, and governance rails, but **none covers authentication**, so adding a third auth mode to the shared tool-provider surface is an architectural change that wants a recorded decision before it wants code. The pattern to follow already exists: `gateway/app/providers/tool/oauth_passthrough.py` (PR #170) performs egress-guarded OAuth discovery and token exchange with credentials encrypted at rest and a strict no-credential-in-errors rule — but it implements *per-user authorization-code* flow for MCP servers, not machine-to-machine client credentials, so it is a model rather than a drop-in. Lands in `gateway/**` and therefore carries security review per CODEOWNERS; the shared-schema blast radius is why this is maintainer-side work rather than something to hand to the requesting contributor. Companion gap, already tracked as a triggered extraction rather than a DE: ADR 0021 D3's character-fidelity verification is defined for prose and undefined for structured register records (the S1-interpretive-adapters ADR, whose trigger is the #271 adapter PR).
 
 ---
 
