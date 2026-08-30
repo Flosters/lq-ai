@@ -81,6 +81,7 @@ from app.providers.tool.echo import EchoToolAdapter
 from app.providers.tool.edgar import EdgarToolAdapter
 from app.providers.tool.eurlex import EurLexToolAdapter
 from app.providers.tool.govinfo import GovInfoToolAdapter
+from app.providers.tool.tavily import TavilyToolAdapter
 from app.router import Router
 from app.routing_log import NullRoutingLogWriter, RoutingLogWriter, SQLRoutingLogWriter
 from app.tool_egress_log import NullToolEgressLogWriter, SQLToolEgressLogWriter
@@ -218,6 +219,10 @@ def build_tool_adapter(provider: ToolProviderConfig) -> ToolProviderAdapter | No
         eurlex_adapter = EurLexToolAdapter.from_config(provider)
         eurlex_adapter.validate_base_url()
         return eurlex_adapter
+    if provider.type == "tavily":
+        tavily_adapter = TavilyToolAdapter.from_config(provider)
+        tavily_adapter.validate_base_url()
+        return tavily_adapter
     return None
 
 

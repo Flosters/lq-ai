@@ -147,11 +147,12 @@ class ProviderConfig(BaseModel):
 # --- Tool / data-source providers (ADR 0014) ---------------------------------
 
 
-ToolProviderType = Literal["echo", "courtlistener", "mcp", "govinfo", "edgar", "eurlex"]
+ToolProviderType = Literal["echo", "courtlistener", "mcp", "govinfo", "edgar", "eurlex", "tavily"]
 """Tool-provider family. ``echo`` is the test/proof type (PR1); ``courtlistener``
 and ``mcp`` land in later PRs; ``govinfo`` is the GovInfo statutory-text adapter
 (WS-E PR1a); ``edgar`` is the SEC EDGAR filings adapter (WS-E PR2a); ``eurlex``
-is the EU EUR-Lex Cellar adapter (WS-E PR2b)."""
+is the EU EUR-Lex Cellar adapter (WS-E PR2b); ``tavily`` is the commercial
+web-search adapter (non-authoritative context; ADR 0014)."""
 
 
 class EgressAllowlistConfig(BaseModel):

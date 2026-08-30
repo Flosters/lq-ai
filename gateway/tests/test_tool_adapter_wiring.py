@@ -5,6 +5,7 @@ Verifies:
 * base_url outside the allowlist → ``EgressRefused`` at build time.
 * disabled provider → ``None`` (no adapter built).
 * mcp provider → ``MCPToolProviderAdapter`` instance.
+* edgar/courtlistener/tavily providers → their adapter instances.
 """
 
 import pytest
@@ -149,3 +150,53 @@ def test_build_tool_adapter_courtlistener(monkeypatch: pytest.MonkeyPatch) -> No
     )
     adapter = build_tool_adapter(cfg.tool_providers[0])
     assert isinstance(adapter, CourtListenerToolAdapter)
+
+
+@pytest.mark.unit
+def test_build_tool_adapter_tavily(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.providers.tool.tavily import TavilyToolAdapter
+
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key-tavily")
+    monkeypatch.setattr(
+        "app.providers.tool.egress._resolve_ips",
+        lambda host: ["93.184.216.34"],
+    )
+    cfg = GatewayConfig.model_validate(
+        {
+            "tool_providers": [
+                {
+                    "name": "tavily-prod",
+                    "type": "tavily",
+                    "base_url": "https://api.tavily.com",
+                    "api_key_env": "TAVILY_API_KEY",
+                    "egress_tier": 4,
+                    "allowlist": {"hosts": ["api.tavily.com"]},
+                }
+            ]
+        }
+    )
+    adapter = build_tool_adapter(cfg.tool_providers[0])
+    assert isinstance(adapter, TavilyToolAdapter)
+
+
+@pytest.mark.unit
+def test_build_tool_adapter_tavily_rejects_base_url_outside_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key-tavily")
+    cfg = GatewayConfig.model_validate(
+        {
+            "tool_providers": [
+                {
+                    "name": "tavily-bad",
+                    "type": "tavily",
+                    "base_url": "https://evil.test",
+                    "api_key_env": "TAVILY_API_KEY",
+                    "egress_tier": 4,
+                    "allowlist": {"hosts": ["api.tavily.com"]},
+                }
+            ]
+        }
+    )
+    with pytest.raises(EgressRefused):
+        build_tool_adapter(cfg.tool_providers[0])

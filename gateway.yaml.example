@@ -268,6 +268,21 @@ providers:
 #     anonymize_outbound: false    # public legal text; skip_anonymization=True on results
 #     # (no api_key_env — EUR-Lex Cellar needs only a User-Agent)
 #     # (no cost_per_call — free source; R4 stays a no-op)
+#
+#   - name: tavily-prod
+#     type: tavily                 # shipped (Task 8); uncomment + set TAVILY_API_KEY to enable
+#     base_url: https://api.tavily.com    # Tavily Search API (POST /search)
+#     api_key_env: TAVILY_API_KEY           # Bearer key — commercial web search (paid)
+#     egress_tier: 4               # public web data (ADR 0014 D4)
+#     allowlist:
+#       hosts: [api.tavily.com]    # exact outbound host allowlist (SSRF)
+#     rate_limit:
+#       requests_per_minute: 60    # commercial API — keep conservative (billing)
+#     anonymize_outbound: true     # ADR 0014 D5: outbound queries may carry matter context
+#     # NOTE: web results are NON-authoritative context; results are marked
+#     # skip_anonymization=True (public web text) but the model must verify
+#     # findings against primary sources (govinfo/eurlex/courtlistener).
+#     # cost_per_call: see Tavily pricing — set for R4 cost dashboards.
 
 # ============================================================
 # MODEL ALIASES — friendly names → specific provider/model
