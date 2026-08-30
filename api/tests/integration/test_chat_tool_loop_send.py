@@ -334,6 +334,94 @@ async def test_loop_final_emits_delta_complete_and_persists(
 
 
 # ---------------------------------------------------------------------------
+# (b2) tools_enabled=False forces single-shot despite a non-empty allowlist
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_tools_enabled_false_fuerza_single_shot(
+    client: AsyncClient,
+    db_user: User,
+    db_session: AsyncSession,
+) -> None:
+    """Per-turn toggle: ``tools_enabled: false`` overrides a non-empty allowlist.
+
+    Mirror of (a) but with ``assemble_allowlist`` returning a non-empty
+    allowlist (research/MCP configured, as in (b)). The turn must take the
+    single-shot streaming path — ``run_chat_tool_loop`` never called, only
+    the streamed content — instead of entering the agentic loop.
+    """
+    headers = _h(db_user)
+    chat_resp = await client.post("/api/v1/chats", headers=headers, json={"title": "toggle-off"})
+    assert chat_resp.status_code == 201, chat_resp.text
+    chat_id = chat_resp.json()["id"]
+
+    # Build a minimal chunk that gateway.chat_completion_stream would yield.
+    chunk = ChatCompletionChunk(
+        id="chunk-toggle-0",
+        created=0,
+        model="claude-sonnet-4-6",
+        choices=[
+            ChatCompletionChunkChoice(
+                index=0,
+                delta=ChatCompletionDelta(content="Single-shot despite tools"),
+                finish_reason="stop",
+            )
+        ],
+        routed_inference_tier=3,
+        routed_provider="anthropic-prod",
+    )
+
+    async def _stream_gen(*_args, **_kwargs):
+        yield chunk
+
+    non_empty_allowlist = _make_non_empty_allowlist()
+
+    with (
+        patch(
+            "app.api.chats.assemble_allowlist",
+            new=AsyncMock(return_value=non_empty_allowlist),
+        ),
+        patch.object(
+            GatewayClient,
+            "chat_completion_stream",
+            new=lambda self, *a, **kw: _stream_gen(self, *a, **kw),
+        ),
+        patch(
+            "app.api.chats.run_chat_tool_loop",
+            new=AsyncMock(),
+        ) as mock_loop,
+    ):
+        resp = await client.post(
+            f"/api/v1/chats/{chat_id}/messages",
+            headers=headers,
+            json={"content": "hello", "stream": True, "tools_enabled": False},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert "text/event-stream" in resp.headers.get("content-type", ""), resp.headers
+
+    frames = _parse_sse_frames(resp.content)
+    types = [f.get("type") for f in frames]
+    assert "start" in types, f"No start frame: {types}"
+    assert "delta" in types, f"No delta frame: {types}"
+    assert "complete" in types, f"No complete frame: {types}"
+
+    # Non-empty allowlist, yet the loop must NOT run (toggle forced single-shot).
+    mock_loop.assert_not_called()
+
+    # Assert the delta carries the text from the mock chunk (no tool calls).
+    delta_frames = [f for f in frames if f.get("type") == "delta"]
+    assert any("Single-shot despite tools" in f.get("delta", "") for f in delta_frames)
+
+    # Assert the assistant Message row was persisted.
+    stmt = select(Message).where(Message.chat_id == uuid.UUID(chat_id), Message.role == "assistant")
+    rows = (await db_session.execute(stmt)).scalars().all()
+    assert rows, "No assistant Message row persisted after single-shot turn"
+
+
+# ---------------------------------------------------------------------------
 # (c) LoopConfirmation — pending rows written, terminal event emitted
 # ---------------------------------------------------------------------------
 

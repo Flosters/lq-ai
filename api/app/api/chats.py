@@ -1691,6 +1691,12 @@ async def send_message(
         )
         allowlist = ChatToolAllowlist(specs={})
 
+    # Per-turn tool toggle (LegVolution): ``False`` fuerza single-shot aunque
+    # haya research/MCP configurado; ``True``/``None`` dejan el allowlist tal
+    # como lo armó ``assemble_allowlist`` (None = comportamiento preexistente).
+    if payload.tools_enabled is False:
+        allowlist = ChatToolAllowlist(specs={})
+
     if payload.stream:
         return await _stream_response(
             db=db,

@@ -432,6 +432,12 @@ class MessageCreateRequest(BaseModel):
     """Whether to stream the response as SSE. ``False`` returns a single
     JSON body."""
 
+    tools_enabled: bool | None = Field(default=None)
+    """Per-turn tool toggle (LegVolution Fase 2). ``None`` = auto (loop runs iff
+    the assembled allowlist is non-empty — pre-existing behavior); ``False``
+    forces the single-shot path for this turn; ``True`` keeps the loop when
+    tools are configured. Omitted by legacy callers, so behavior is unchanged."""
+
 
 # --- Response schemas --------------------------------------------------------
 
