@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import uuid
+from decimal import Decimal
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1191,3 +1193,213 @@ async def test_dispatch_authority_unknown_source_does_not_raise(db):
     assert result.outcome == "success"
     assert result.data["authority"]["error"] == "source not available"
     assert gw.calls == []  # never reached the gateway for an unknown source
+
+
+# ---------------------------------------------------------------------------
+# Web search dispatch (LegVolution Fase 3, Task 10)
+# ---------------------------------------------------------------------------
+
+
+def _web_search_spec(provider: str = "tavily-prod") -> ToolSpec:
+    """A ToolSpec as produced by assemble_allowlist for the tavily web search."""
+    return ToolSpec(
+        function_name="search_web",
+        kind="websearch",
+        provider=provider,
+        tool="search_web",
+        read_only=True,
+        destructive=False,
+        requires_confirmation=False,
+        parameters={"type": "object", "properties": {}, "required": ["query"]},
+        description="Public web search (Tavily).",
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_web_search_calls_gateway_and_builds_data() -> None:
+    """With a query, the dispatch calls gateway.call_tool(provider, tool, args)
+    and wraps payload.results in the {web_search: {query, results, count}} shape."""
+    from app.chat.tool_loop import _dispatch_web_search
+
+    gw = _FakeGateway(
+        {
+            "query": "q",
+            "results": [{"title": "T", "url": "https://x.gov.ar", "snippet": "s"}],
+            "count": 1,
+        }
+    )
+    result = await _dispatch_web_search(_web_search_spec(), {"query": "q"}, gw, None)
+    assert isinstance(result, ToolResult)
+    assert result.outcome == "success"
+    assert result.cost_usd == Decimal("0")
+    ws = result.data["web_search"]
+    assert ws["query"] == "q"
+    assert ws["results"] == [{"title": "T", "url": "https://x.gov.ar", "snippet": "s"}]
+    assert ws["count"] == 1
+    assert gw.calls == [("tavily-prod", "search_web", {"query": "q"})]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_web_search_empty_query_skips_gateway() -> None:
+    """An empty/missing query returns an empty success observation WITHOUT
+    reaching the gateway."""
+    from app.chat.tool_loop import _dispatch_web_search
+
+    gw = _FakeGateway({})
+    for args in ({}, {"query": ""}, {"query": "   "}):
+        result = await _dispatch_web_search(_web_search_spec(), args, gw, None)
+        assert result.outcome == "success"
+        assert result.data["web_search"] == {"query": "", "results": [], "count": 0}
+    assert gw.calls == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_web_search_sanitizes_optional_args() -> None:
+    """max_results outside 1-20 (or non-int) and empty include_domains are
+    dropped; valid optionals are forwarded verbatim (include_domains capped at 10)."""
+    from app.chat.tool_loop import _dispatch_web_search
+
+    gw = _FakeGateway({"results": []})
+    await _dispatch_web_search(
+        _web_search_spec(),
+        {"query": "q", "max_results": 50, "include_domains": []},
+        gw,
+        None,
+    )
+    assert gw.calls == [("tavily-prod", "search_web", {"query": "q"})]
+
+    gw2 = _FakeGateway({"results": []})
+    await _dispatch_web_search(
+        _web_search_spec(),
+        {
+            "query": "q",
+            "max_results": 5,
+            "include_domains": [f"d{i}.gov.ar" for i in range(12)],
+        },
+        gw2,
+        None,
+    )
+    assert gw2.calls == [
+        (
+            "tavily-prod",
+            "search_web",
+            {
+                "query": "q",
+                "max_results": 5,
+                "include_domains": [f"d{i}.gov.ar" for i in range(10)],
+            },
+        )
+    ]
+
+
+def test_collect_tool_sources_websearch_caps_and_drops_urlless() -> None:
+    """websearch results → web_result provenance records: cap 5, url-less
+    entries dropped, url used as label/external_ref fallback."""
+    spec = _web_search_spec()
+    results: list[dict[str, Any]] = [
+        {"title": f"Result {i}", "url": f"https://example.com/{i}", "snippet": "s"}
+        for i in range(7)
+    ]
+    # A result inside the cap without a title: label falls back to the url.
+    results[4] = {"url": "https://example.com/4", "snippet": "s"}
+    results.append({"title": "No url here", "snippet": "s"})  # dropped: no url
+    results.append({"title": None, "url": ""})  # dropped: falsy url
+    data = {"web_search": {"query": "q", "results": results, "count": 9}}
+
+    records = collect_tool_sources(spec, data)
+    assert len(records) == 5
+    assert all(r.source_kind == "web_result" for r in records)
+    first = records[0]
+    assert first.label == "Result 0"
+    assert first.subtitle is None
+    assert first.url == "https://example.com/0"
+    assert first.external_ref == "https://example.com/0"
+    assert first.provider == "tavily-prod"
+    assert first.tool == "search_web"
+    # title-less entries fall back to the url as label
+    assert records[-1].label == "https://example.com/4"
+    assert records[-1].url == "https://example.com/4"
+
+
+def test_collect_tool_sources_websearch_empty_data_returns_empty() -> None:
+    """No web_search block / no results → no provenance records."""
+    spec = _web_search_spec()
+    assert collect_tool_sources(spec, None) == []
+    assert collect_tool_sources(spec, {}) == []
+    assert collect_tool_sources(spec, {"web_search": {"query": "q", "results": []}}) == []
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_maps_websearch_to_retrieve_web_intent() -> None:
+    """execute_tool maps kind="websearch" → ToolIntent.retrieve_web and routes
+    the dispatch to _dispatch_web_search (governance substrate stays in the path)."""
+    from app.chat.tool_loop import execute_tool
+
+    async def _fake_governed(db: Any, **kwargs: Any) -> Any:
+        return await kwargs["dispatch"]()
+
+    gw = _FakeGateway({"results": []})
+    with (
+        patch("app.chat.tool_loop.governed_tool_invocation", new=_fake_governed),
+        patch("app.chat.tool_loop.resolve_provider_tier", new=AsyncMock(return_value=1)),
+    ):
+        result = await execute_tool(
+            MagicMock(),  # db — unused on the websearch path
+            user=MagicMock(),
+            gateway=gw,
+            spec=_web_search_spec(),
+            args={"query": "q"},
+            cluster_cache={},
+            server_auth_map={},
+            assistant_message_id=uuid.uuid4(),
+        )
+
+    assert result.outcome == "success"
+    assert result.data["web_search"]["query"] == "q"
+    assert gw.calls == [("tavily-prod", "search_web", {"query": "q"})]
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_websearch_audit_intent_is_retrieve_web() -> None:
+    """The intent handed to governed_tool_invocation for kind="websearch" is
+    ToolIntent.retrieve_web (what lands in the tool_call_log audit row)."""
+    from app.autonomous.enums import ToolIntent
+    from app.chat.tool_loop import execute_tool
+
+    captured: dict[str, Any] = {}
+
+    async def _capture_governed(db: Any, **kwargs: Any) -> Any:
+        captured["intent"] = kwargs["intent"]
+        captured["provider"] = kwargs["provider"]
+        captured["tool"] = kwargs["tool"]
+        return await kwargs["dispatch"]()
+
+    gw = _FakeGateway({"results": []})
+    with (
+        patch("app.chat.tool_loop.governed_tool_invocation", new=_capture_governed),
+        patch("app.chat.tool_loop.resolve_provider_tier", new=AsyncMock(return_value=1)),
+    ):
+        await execute_tool(
+            MagicMock(),
+            user=MagicMock(),
+            gateway=gw,
+            spec=_web_search_spec(),
+            args={"query": "q"},
+            cluster_cache={},
+            server_auth_map={},
+            assistant_message_id=uuid.uuid4(),
+        )
+
+    assert captured["intent"] == ToolIntent.retrieve_web
+    assert captured["provider"] == "tavily-prod"
+    assert captured["tool"] == "search_web"
+
+
+@pytest.mark.asyncio
+async def test_estimate_tool_cost_retrieve_web_is_zero() -> None:
+    """estimate_tool_cost covers the new retrieve_web intent with Decimal("0")
+    (gateway-brokered external lookup, DE-344 defers per-provider tool cost)."""
+    from app.autonomous.cost import estimate_tool_cost
+    from app.autonomous.enums import ToolIntent
+
+    assert await estimate_tool_cost(ToolIntent.retrieve_web, {}, None) == Decimal("0")

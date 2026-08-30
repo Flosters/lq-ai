@@ -58,6 +58,12 @@ class ToolIntent(StrEnum):
     # GovInfo through the registry + GovInfoAdapter egress path.  Granted only
     # in analysis (authority lookup is an analysis-phase activity).
     retrieve_authority = "retrieve_authority"
+    # LegVolution Fase 3 (ADR 0014): gateway-brokered public web search via the
+    # tavily tool provider.  Chat-only — deliberately NOT in PHASE_GRANTS: the
+    # autonomous executor never runs it; the chat tool loop dispatches
+    # kind="websearch" straight to it.  Cost-0 in estimate_tool_cost (DE-344
+    # defers per-provider tool cost), like the other gateway-brokered lookups.
+    retrieve_web = "retrieve_web"
 
 
 PHASE_GRANTS: dict[Phase, frozenset[ToolIntent]] = {

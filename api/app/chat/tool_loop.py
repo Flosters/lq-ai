@@ -285,7 +285,9 @@ def collect_tool_sources(spec: ToolSpec, data: Any) -> list[ToolSourceRecord]:
     """Route a tool result to its provenance records by ``spec.kind`` (DE-350).
 
     MCP → one ``mcp`` record; authority (DE-369, ADR 0021 D3) → one record for
-    both search and get calls; research → the existing case-law extraction.
+    both search and get calls; websearch (LegVolution Fase 3) → up to five
+    ``web_result`` records (url-less results dropped); research → the existing
+    case-law extraction.
     """
     if spec.kind == "mcp":
         rec = extract_mcp_tool_source(spec, data)
@@ -312,6 +314,29 @@ def collect_tool_sources(spec: ToolSpec, data: Any) -> list[ToolSourceRecord]:
                 tool=spec.tool,
             )
         ]
+    if spec.kind == "websearch":
+        ws = (data or {}).get("web_search") if isinstance(data, dict) else None
+        if not ws:
+            return []
+        records: list[ToolSourceRecord] = []
+        for r in (ws.get("results") or [])[:5]:
+            if not isinstance(r, dict):
+                continue
+            url = r.get("url")
+            if not url:
+                continue
+            records.append(
+                ToolSourceRecord(
+                    source_kind="web_result",
+                    label=r.get("title") or url,
+                    subtitle=None,
+                    url=url,
+                    external_ref=url,
+                    provider=spec.provider,
+                    tool=spec.tool,
+                )
+            )
+        return records
     return extract_tool_sources(spec.tool, data)
 
 
@@ -588,6 +613,54 @@ async def _dispatch_mcp(
 
 
 # ---------------------------------------------------------------------------
+# Web search dispatch (LegVolution Fase 3; ADR 0014 tavily tool provider)
+# ---------------------------------------------------------------------------
+
+
+async def _dispatch_web_search(
+    spec: ToolSpec,
+    args: dict[str, Any],
+    gateway: Any,
+    request_id: str | None,
+) -> ToolResult:
+    """Dispatch kind="websearch": a single op (search_web) against the gateway.
+
+    Web results are NOT citable authority text — they never pass through
+    FetchedAuthority / ``store_authority_text`` — so the raw result list flows
+    to the model verbatim (via :func:`tool_result_message`) and to retrieval
+    provenance as ``source_kind="web_result"`` records (see
+    :func:`collect_tool_sources`).
+
+    Cost is ``Decimal("0")`` in v1 — DE-344 defers per-provider tool cost.
+    """
+    query = str(args.get("query") or "").strip()
+    if not query:
+        # Degrade to a normal empty observation instead of hitting the gateway
+        # with a degenerate call (same non-fatal posture as _dispatch_authority).
+        return ToolResult(
+            cost_usd=Decimal("0"),
+            data={"web_search": {"query": "", "results": [], "count": 0}},
+            outcome="success",
+        )
+    call_args: dict[str, Any] = {"query": query}
+    raw_max = args.get("max_results")
+    if isinstance(raw_max, int) and 1 <= raw_max <= 20:
+        call_args["max_results"] = raw_max
+    include_domains = args.get("include_domains")
+    if isinstance(include_domains, list) and include_domains:
+        call_args["include_domains"] = [str(d) for d in include_domains][:10]
+
+    result = await gateway.call_tool(spec.provider, spec.tool, call_args)
+    payload = result.get("payload") if isinstance(result, dict) else None
+    results = (payload or {}).get("results") or []
+    return ToolResult(
+        cost_usd=Decimal("0"),
+        data={"web_search": {"query": query, "results": results, "count": len(results)}},
+        outcome="success",
+    )
+
+
+# ---------------------------------------------------------------------------
 # execute_tool
 # ---------------------------------------------------------------------------
 
@@ -646,6 +719,10 @@ async def execute_tool(
         intent = ToolIntent.retrieve_caselaw
     elif spec.kind == "authority":
         intent = ToolIntent.retrieve_authority
+    elif spec.kind == "websearch":
+        # LegVolution Fase 3: chat-only web search; never in PHASE_GRANTS —
+        # the autonomous executor does not run it.
+        intent = ToolIntent.retrieve_web
     else:
         intent = ToolIntent.call_mcp_tool
 
@@ -672,6 +749,8 @@ async def execute_tool(
             return await _dispatch_research(db, spec, args, cluster_cache, request_id)
         elif spec.kind == "authority":
             return await _dispatch_authority(db, spec, args, gateway, request_id)
+        elif spec.kind == "websearch":
+            return await _dispatch_web_search(spec, args, gateway, request_id)
         else:
             return await _dispatch_mcp(db, user, gateway, spec, args, server_auth_map, request_id)
 

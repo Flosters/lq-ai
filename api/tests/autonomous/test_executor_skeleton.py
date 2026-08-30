@@ -163,10 +163,11 @@ def test_phase_grants_covers_all_phases() -> None:
 
 @pytest.mark.unit
 def test_tool_intent_members() -> None:
-    """ToolIntent has exactly the twelve members specified (M4-B2 adds
+    """ToolIntent has exactly the thirteen members specified (M4-B2 adds
     propose_precedent; Donna #8 adds emit_artifact; PR5a adds the two
     external-tool intents retrieve_caselaw + call_mcp_tool;
-    WS-D PR1 adds plan; WS-E PR1a adds retrieve_authority)."""
+    WS-D PR1 adds plan; WS-E PR1a adds retrieve_authority; LegVolution
+    Fase 3 adds the chat-only retrieve_web)."""
     expected = {
         "retrieve_chunks",
         "run_skill",
@@ -183,6 +184,10 @@ def test_tool_intent_members() -> None:
         "plan",
         # WS-E PR1a: govinfo authority retrieval.
         "retrieve_authority",
+        # LegVolution Fase 3: chat-only gateway-brokered web search (tavily);
+        # deliberately NOT in PHASE_GRANTS — the autonomous executor never
+        # runs it, the chat tool loop dispatches kind="websearch".
+        "retrieve_web",
     }
     actual = {m.value for m in ToolIntent}
     assert actual == expected
