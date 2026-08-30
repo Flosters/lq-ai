@@ -94,6 +94,20 @@ SOURCE_REGISTRY: dict[str, SourceSpec] = {
         ops=("get_authority",),
         adapter=EurLexAdapter(),
     ),
+    "tavily": SourceSpec(
+        type="tavily",
+        jurisdiction="web",
+        coverage=(
+            "Public web search via Tavily — general web/news results, "
+            "NOT a legal authority (no citable text)"
+        ),
+        content_kinds=("web_result",),
+        ops=("search_web",),
+        # Web results are NOT citable authority text — no FetchedAuthority
+        # adapter; the single op is dispatched directly in chat tool_loop
+        # (_dispatch_web_search), never through the authority path.
+        adapter=None,
+    ),
 }
 
 # ---------------------------------------------------------------------------

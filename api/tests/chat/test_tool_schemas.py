@@ -6,6 +6,7 @@ from app.chat.tool_schemas import (
     AUTHORITY_OPS,
     AUTHORITY_TOOL_SCHEMAS,
     RESEARCH_OPS,
+    WEB_SEARCH_TOOL_SCHEMAS,
     assemble_allowlist,
     mcp_function_name,
     parse_mcp_function_name,
@@ -259,3 +260,97 @@ def test_authority_search_omitted_when_no_search_source():
     # only a get-only source enabled → no search_authority tool at all
     schemas = build_authority_tool_schemas(enabled_sources=["eurlex"])
     assert [s["name"] for s in schemas] == ["get_authority"]
+
+
+# ---------------------------------------------------------------------------
+# Web search (search_web) — gated on an enabled tavily tool provider
+# ---------------------------------------------------------------------------
+
+
+def test_web_search_schema_declares_search_web():
+    assert set(WEB_SEARCH_TOOL_SCHEMAS) == {"search_web"}
+    schema = WEB_SEARCH_TOOL_SCHEMAS["search_web"]
+    assert schema.get("description")
+    assert "not a legal authority" in schema["description"].lower()
+    assert schema["parameters"]["type"] == "object"
+    assert schema["parameters"]["required"] == ["query"]
+    properties = schema["parameters"]["properties"]
+    assert properties["include_domains"]["items"] == {"type": "string"}
+    assert properties["max_results"]["type"] == "integer"
+
+
+class _FakeTavilySource:
+    type = "tavily"
+    enabled = True
+    name = "tavily-prod"
+
+
+class _FakeTavilySourceDisabled:
+    type = "tavily"
+    enabled = False
+    name = "tavily-prod"
+
+
+@pytest.mark.asyncio
+async def test_assemble_allowlist_adds_search_web_when_tavily_enabled(db, monkeypatch):
+    async def _fake_resolve(gateway):
+        return [_FakeTavilySource()]
+
+    monkeypatch.setattr("app.chat.tool_schemas.resolve_available_sources", _fake_resolve)
+    with (
+        patch(
+            "app.chat.tool_schemas.get_capabilities",
+            new=AsyncMock(return_value={"enabled": False, "providers": []}),
+        ),
+        patch("app.chat.tool_schemas.list_servers", new=AsyncMock(return_value=[])),
+    ):
+        allowlist = await assemble_allowlist(db, gateway=_FakeGateway(), request_id="r1")
+    spec = allowlist.resolve("search_web")
+    assert spec is not None
+    assert spec.kind == "websearch"
+    assert spec.provider == "tavily-prod"
+    assert spec.tool == "search_web"
+    assert spec.read_only is True
+    assert spec.destructive is False
+    assert spec.requires_confirmation is False
+    assert spec.parameters == WEB_SEARCH_TOOL_SCHEMAS["search_web"]["parameters"]
+    assert spec.description == WEB_SEARCH_TOOL_SCHEMAS["search_web"]["description"]
+    # a tavily source is NOT an authority source — no authority specs from it
+    assert not any(s.kind == "authority" for s in allowlist.specs.values())
+
+
+@pytest.mark.asyncio
+async def test_assemble_allowlist_no_search_web_without_tavily(db, monkeypatch):
+    # govinfo is enabled but is not a web-search provider → no search_web
+    async def _fake_resolve(gateway):
+        return [_FakeGovInfoSource()]
+
+    monkeypatch.setattr("app.chat.tool_schemas.resolve_available_sources", _fake_resolve)
+    with (
+        patch(
+            "app.chat.tool_schemas.get_capabilities",
+            new=AsyncMock(return_value={"enabled": False, "providers": []}),
+        ),
+        patch("app.chat.tool_schemas.list_servers", new=AsyncMock(return_value=[])),
+    ):
+        allowlist = await assemble_allowlist(db, gateway=_FakeGateway(), request_id="r1")
+    assert allowlist.resolve("search_web") is None
+    # …while the authority tools from govinfo are still offered
+    assert allowlist.resolve("search_authority") is not None
+
+
+@pytest.mark.asyncio
+async def test_assemble_allowlist_no_search_web_when_tavily_disabled(db, monkeypatch):
+    async def _fake_resolve(gateway):
+        return [_FakeTavilySourceDisabled()]
+
+    monkeypatch.setattr("app.chat.tool_schemas.resolve_available_sources", _fake_resolve)
+    with (
+        patch(
+            "app.chat.tool_schemas.get_capabilities",
+            new=AsyncMock(return_value={"enabled": False, "providers": []}),
+        ),
+        patch("app.chat.tool_schemas.list_servers", new=AsyncMock(return_value=[])),
+    ):
+        allowlist = await assemble_allowlist(db, gateway=_FakeGateway(), request_id="r1")
+    assert allowlist.resolve("search_web") is None

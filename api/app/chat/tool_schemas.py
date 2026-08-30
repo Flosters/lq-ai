@@ -148,6 +148,41 @@ AUTHORITY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
 }
 AUTHORITY_OPS = frozenset(AUTHORITY_TOOL_SCHEMAS)
 
+# Web search (LegVolution Fase 3): gated on a tavily tool provider being
+# configured AND enabled in the gateway. Read-only, single op, no `source`
+# argument (unlike authority ops — there is exactly one web provider type).
+# Web results are NOT a legal authority: they never become citable text
+# (no FetchedAuthority) and are surfaced as non-authoritative context only.
+WEB_SEARCH_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "search_web": {
+        "description": (
+            "Public web search (Tavily). Ranked web results with title, url and "
+            "snippet — NOT a legal authority (no citable text). Use for "
+            "non-authoritative context (news, official sites via "
+            "include_domains); never as a substitute for the authority sources."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search terms."},
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum results to return (1-20, default 8).",
+                },
+                "include_domains": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Restrict results to these domains, e.g. "
+                        '["boletinoficial.gob.ar", "csjn.gov.ar"].'
+                    ),
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
 
 def build_authority_tool_schemas(enabled_sources: list[str]) -> list[dict[str, Any]]:
     """Build the per-turn authority function schemas for the enabled sources.
@@ -210,7 +245,7 @@ def parse_mcp_function_name(name: str) -> tuple[str, str] | None:
 @dataclass(frozen=True)
 class ToolSpec:
     function_name: str
-    kind: Literal["research", "mcp", "authority"]
+    kind: Literal["research", "mcp", "authority", "websearch"]
     provider: str
     tool: str
     read_only: bool
@@ -244,7 +279,8 @@ class ChatToolAllowlist:
 async def assemble_allowlist(
     db: AsyncSession, *, gateway: Any, request_id: str | None = None
 ) -> ChatToolAllowlist:
-    """Build the per-turn allowlist. Empty when no research/MCP/authority is configured."""
+    """Build the per-turn allowlist. Empty when no research/MCP/authority/web
+    search is configured."""
     specs: dict[str, ToolSpec] = {}
 
     caps = await get_capabilities(request_id=request_id)
@@ -305,6 +341,40 @@ async def assemble_allowlist(
         log.warning(
             "assemble_allowlist: authority source resolution failed — "
             "authority tools unavailable this turn",
+            exc_info=True,
+        )
+
+    # Web search (LegVolution Fase 3): gated on a tavily tool provider being
+    # configured AND enabled in the gateway. Unlike the authority ops there is
+    # no `source` argument — exactly one web provider type — so the gateway
+    # provider name goes straight onto the ToolSpec (same join the authority
+    # branch and _resolve_authority_provider_name use). Web results are NOT
+    # authority text: no adapter, no FetchedAuthority — the dispatch is
+    # dedicated in tool_loop. Guarded independently (PR1a lesson): a
+    # resolution failure must not strip the research/MCP/authority tools.
+    try:
+        sources_ws = await resolve_available_sources(gateway)
+        tavily = next(
+            (s for s in sources_ws if s.type == "tavily" and s.enabled and s.name),
+            None,
+        )
+        if tavily is not None:
+            ws_schema = WEB_SEARCH_TOOL_SCHEMAS["search_web"]
+            specs["search_web"] = ToolSpec(
+                function_name="search_web",
+                kind="websearch",
+                provider=str(tavily.name),
+                tool="search_web",
+                read_only=True,
+                destructive=False,
+                requires_confirmation=False,
+                parameters=ws_schema["parameters"],
+                description=ws_schema["description"],
+            )
+    except Exception:
+        log.warning(
+            "assemble_allowlist: web search resolution failed — "
+            "search_web unavailable this turn",
             exc_info=True,
         )
 
