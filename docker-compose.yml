@@ -124,6 +124,12 @@ services:
       # (case-law is operator-opt-in: uncomment the courtlistener block in
       # gateway.yaml AND set this token to enable). See gateway.yaml.example.
       COURTLISTENER_API_TOKEN: ${COURTLISTENER_API_TOKEN:-}
+      # Web search (ADR 0014). Same forwarding pattern: an enabled tavily
+      # tool_providers entry whose `api_key_env:` names TAVILY_API_KEY
+      # resolves at config-load time. Unset by default (web search is
+      # operator-opt-in: uncomment the tavily block in gateway.yaml AND set
+      # this key to enable). See gateway.yaml.example.
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
       # B6 partial — Ollama (Mode-2 / Tier-1). Forwarded so the
       # gateway.yaml's ${OLLAMA_BASE_URL:-http://ollama:11434}
       # placeholder resolves at config-load time. Operators running
